@@ -23,7 +23,7 @@ func main() {
 	switch os.Args[1] {
 	case "hook":
 		if len(os.Args) < 3 {
-			fmt.Fprintln(os.Stderr, "usage: tmux-agent-bar hook <thinking|waiting|done|error>")
+			fmt.Fprintln(os.Stderr, "usage: tmux-agent-bar hook <thinking|waiting|done|error|subagent_stop|planning>")
 			os.Exit(1)
 		}
 		runHook(os.Args[2])
@@ -754,6 +754,7 @@ func installClaudeSettings() error {
 		{"SubagentStop", "tmux-agent-bar hook subagent_stop"},
 		{"EnterPlanMode", "tmux-agent-bar hook planning"},
 		{"ExitPlanMode", "tmux-agent-bar hook thinking"},
+		{"UserPromptSubmit", "tmux-agent-bar hook thinking"},
 	}
 
 	added := 0
