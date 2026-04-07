@@ -41,7 +41,7 @@ tmux status-interval (1초마다)
     → window-status-format 평가
     → tmux-agent-bar status <window_index> 호출
     → 해당 윈도우 pane들의 상태 파일 읽어 이모지 반환
-    → 우선순위: 🚨 > ✋ > 🧠 > ✅ > ""
+    → 우선순위: 🚨 > 💬 > 🧠 > ✅ > ""
     → 윈도우 이름 (#I) 바로 뒤에 이모지 삽입
 ```
 
@@ -73,7 +73,7 @@ set -g window-status-current-format "#(tmux-agent-bar status #{window_index})#I 
 
 ### 상태 우선순위 (윈도우 단위 집계)
 
-`🚨` error > `✋` waiting > `🧠` thinking > `✅` done > `` idle
+`🚨` error > `💬` waiting > `🧠` thinking > `✅` done > `` idle
 
 ---
 
@@ -83,7 +83,7 @@ set -g window-status-current-format "#(tmux-agent-bar status #{window_index})#I 
 - [x] README.md, AGENTS.md, PLAN.md 문서화
 - [x] 기술 결정 확정 (Go / hooks / window-status-format)
 - [x] Go 프로젝트 초기화 및 핵심 기능 구현 (완료 2026-04-07)
-- [x] 이모지 세트 확정: 🧠 thinking / ✋ waiting / ✅ done / 🚨 error
+- [x] 이모지 세트 확정: 🧠 thinking / 💬 waiting / ✅ done / 🚨 error
 - [x] 실전 테스트 및 tmux.conf 포맷 수정 (기존 스타일 보존, #I 뒤에 이모지 삽입)
 - [x] PreToolUse 훅 누락 버그 수정 (~/.claude/settings.json 직접 추가)
 

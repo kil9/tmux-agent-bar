@@ -44,11 +44,57 @@ func TestAggregateWindowEmoji_anyWaiting(t *testing.T) {
 	setStateDirForTest(t, dir)
 
 	writeStateToDir(t, dir, "sess_1_0", "done")
-	writeStateToDir(t, dir, "sess_1_1", "waiting")
+	writeStateToDir(t, dir, "sess_1_1", "thinking")
+	writeAgedNotifyPending(t, dir, "sess_1_1") // aged marker promotes thinking→waiting
 
 	emoji := aggregateWindowEmojiFromDir(dir, "sess", "1", []string{"0", "1"})
-	if emoji != "✋" {
-		t.Errorf("got %q, want ✋", emoji)
+	if emoji != "💬" {
+		t.Errorf("got %q, want 💬", emoji)
+	}
+}
+
+func TestDeferredNotify_freshMarkerKeepsThinking(t *testing.T) {
+	dir := t.TempDir()
+	setStateDirForTest(t, dir)
+
+	writeStateToDir(t, dir, "sess_1_0", "thinking")
+	// Fresh marker (just now) — should NOT promote yet.
+	path := filepath.Join(dir, "sess_1_0.notify_pending")
+	if err := os.WriteFile(path, []byte(time.Now().Format(time.RFC3339Nano)), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	emoji := aggregateWindowEmojiFromDir(dir, "sess", "1", []string{"0"})
+	if emoji != "🧠" {
+		t.Errorf("got %q, want 🧠 (fresh marker should not promote)", emoji)
+	}
+}
+
+func TestDeferredNotify_agedMarkerPromotes(t *testing.T) {
+	dir := t.TempDir()
+	setStateDirForTest(t, dir)
+
+	writeStateToDir(t, dir, "sess_1_0", "thinking")
+	writeAgedNotifyPending(t, dir, "sess_1_0")
+
+	emoji := aggregateWindowEmojiFromDir(dir, "sess", "1", []string{"0"})
+	if emoji != "💬" {
+		t.Errorf("got %q, want 💬 (aged marker should promote)", emoji)
+	}
+}
+
+func TestDeferredNotify_stopClearsMarker(t *testing.T) {
+	dir := t.TempDir()
+	setStateDirForTest(t, dir)
+
+	// Simulate: thinking state + aged marker, but then "done" was written
+	// (Stop fired and cleared the marker).
+	writeStateToDir(t, dir, "sess_1_0", "done")
+	// No marker file — Stop removed it. Pane should show ✅, not 💬.
+
+	emoji := aggregateWindowEmojiFromDir(dir, "sess", "1", []string{"0"})
+	if emoji != "✅" {
+		t.Errorf("got %q, want ✅", emoji)
 	}
 }
 
@@ -226,17 +272,26 @@ func writeStateToDir(t *testing.T, dir, key, status string) {
 
 // aggregateWindowEmojiFromDir is a testable version of aggregateWindowEmoji
 // that accepts an explicit directory and pane list instead of calling tmux.
+// stateDir must be set to dir before calling (via setStateDirForTest).
 func aggregateWindowEmojiFromDir(dir, session, windowIndex string, panes []string) string {
 	states := make([]string, 0, len(panes))
 	for _, pane := range panes {
 		key := stateKey(session, windowIndex, pane)
-		path := filepath.Join(dir, key)
-		data, err := os.ReadFile(path)
-		if err != nil {
-			states = append(states, "")
-			continue
-		}
-		states = append(states, string(data))
+		states = append(states, effectiveState(key, time.Time{}))
 	}
 	return emojiForStates(states)
+}
+
+// writeAgedNotifyPending writes a .notify_pending marker that appears older
+// than notifyPendingDelay so that effectiveState promotes the pane to "waiting".
+func writeAgedNotifyPending(t *testing.T, dir, key string) {
+	t.Helper()
+	path := filepath.Join(dir, key+".notify_pending")
+	aged := time.Now().Add(-2 * notifyPendingDelay)
+	if err := os.WriteFile(path, []byte(aged.Format(time.RFC3339Nano)), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chtimes(path, aged, aged); err != nil {
+		t.Fatal(err)
+	}
 }

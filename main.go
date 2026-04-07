@@ -75,32 +75,34 @@ func runHook(status string) {
 		os.Exit(1)
 	}
 
-	// SubagentStop: record a timestamp so the subsequent Notification hook can
-	// distinguish "subagent finished, main agent still thinking" from "interrupted".
+	// SubagentStop: record a timestamp (used only for cleanup; no longer needed
+	// to suppress Notification since deferred notify handles it).
 	if status == "subagent_stop" {
 		_ = markSubagentStop(key)
 		return
 	}
 
-	// Notification hook fires in several cases; only set ✋ when Claude was
-	// genuinely active and is now paused waiting for the user:
-	//   - current="done"   → Stop already fired (task complete), suppress ✋.
-	//   - current=""       → idle/never started; spurious notification (e.g. race
-	//                        where runStatus cleared "done" just before Notification
-	//                        fired). Suppress to avoid phantom ✋.
-	//   - current="thinking" + recent SubagentStop → subagent finished but main
-	//                        agent is still running. Suppress ✋.
-	// Allow in all other cases (e.g. interrupted mid-task: current="thinking"
-	// without a recent SubagentStop, or current="error"/"waiting").
+	// Notification hook: write a deferred marker instead of immediately setting
+	// state. runStatus promotes it to "waiting" only after notifyPendingDelay has
+	// elapsed without a Stop/thinking hook clearing it. This prevents 💬 from
+	// flashing when Notification fires just before Stop (normal end-of-response).
 	if status == "waiting" {
-		current := readState(key)
-		switch {
-		case current == "done", current == "":
-			return
-		case current == "thinking" && recentSubagentStop(key):
-			return
+		_ = writeNotifyPending(key)
+		if meta, ok := resolvePaneMeta(hookData); ok {
+			_ = writeMeta(key, meta)
 		}
+		parts := strings.SplitN(key, "_", 3)
+		if len(parts) == 3 {
+			if panes, err := tmuxListPanes(parts[0], parts[1]); err == nil {
+				cleanStaleFiles(stateDir, parts[0], parts[1], panes)
+			}
+		}
+		return
 	}
+
+	// For all non-waiting statuses: clear any pending notify marker so that a
+	// Notification that arrived before this hook does not promote to 💬.
+	os.Remove(filepath.Join(stateDir, key+".notify_pending"))
 
 	// When transitioning into "thinking" from a non-thinking state, record the
 	// start time so that tool-use calls (which re-trigger PreToolUse) don't
@@ -149,7 +151,7 @@ func cleanStaleFiles(dir, session, windowIndex string, alivePanes []string) {
 		name := e.Name()
 		// Match state files and all marker files (.meta, .thinking_start, .subagent_stop).
 		base := name
-		for _, suffix := range []string{".meta", ".thinking_start", ".subagent_stop"} {
+		for _, suffix := range []string{".meta", ".thinking_start", ".subagent_stop", ".notify_pending"} {
 			base = strings.TrimSuffix(base, suffix)
 		}
 		if strings.HasPrefix(base, prefix) && !alive[base] {
@@ -315,7 +317,7 @@ func stateKey(session, windowIndex, pane string) string {
 
 // emojiForStates returns the highest-priority emoji for the given slice of state strings.
 //
-// Priority: 🚨 (any error) > ✋ (any waiting) > 🧠 (any thinking) > ✅ (any done) > "" (all idle)
+// Priority: 🚨 (any error) > 💬 (any waiting) > 🧠 (any thinking) > ✅ (any done) > "" (all idle)
 func emojiForStates(states []string) string {
 	anyError := false
 	anyWaiting := false
@@ -339,7 +341,7 @@ func emojiForStates(states []string) string {
 	case anyError:
 		return "🚨"
 	case anyWaiting:
-		return "✋"
+		return "💬"
 	case anyThinking:
 		return "🧠"
 	case anyDone:
@@ -369,7 +371,7 @@ func tmuxCurrentWindowIndex() (string, error) {
 
 // clearViewedStates removes state files for panes in the given window that are
 // in "done" state. Called when the user activates the window so that ✅
-// disappears once seen. ✋ is intentionally not cleared here — it should
+// disappears once seen. 💬 is intentionally not cleared here — it should
 // persist until the user actually interacts (approves/types), at which point
 // the next hook (PreToolUse → thinking, or Stop → done) overwrites it.
 func clearViewedStates(session, windowIndex string) {
@@ -495,6 +497,41 @@ func readThinkingStart(key string) (time.Time, bool) {
 		return time.Time{}, false
 	}
 	return t, true
+}
+
+// notifyPendingDelay is how long a .notify_pending marker must age before
+// runStatus promotes the pane state to "waiting". Keeps 💬 from flashing
+// during the brief Notification→Stop window at normal end-of-response.
+const notifyPendingDelay = time.Second
+
+// writeNotifyPending records the current time to the notify-pending marker.
+// Called by "hook waiting" instead of writing state directly.
+func writeNotifyPending(key string) error {
+	if err := os.MkdirAll(stateDir, 0o755); err != nil {
+		return err
+	}
+	path := filepath.Join(stateDir, key+".notify_pending")
+	return os.WriteFile(path, []byte(time.Now().Format(time.RFC3339Nano)), 0o644)
+}
+
+// effectiveState returns the display state for the given pane.
+// If the recorded state is "thinking" and a .notify_pending marker has aged
+// past notifyPendingDelay without being cleared by a subsequent hook, the
+// pane is promoted to "waiting". This defers 💬 long enough for Stop to fire
+// and clear the marker in the common end-of-response case.
+func effectiveState(key string, created time.Time) string {
+	state := readStateFresh(key, created)
+	if state != "thinking" {
+		return state
+	}
+	info, err := os.Stat(filepath.Join(stateDir, key+".notify_pending"))
+	if err != nil {
+		return state
+	}
+	if time.Since(info.ModTime()) >= notifyPendingDelay {
+		return "waiting"
+	}
+	return state
 }
 
 // markSubagentStop writes the current time to the subagent-stop marker file.
@@ -714,7 +751,7 @@ func aggregateWindowEmoji(session, windowIndex string) string {
 	states := make([]string, 0, len(panes))
 	for _, pane := range panes {
 		key := stateKey(session, windowIndex, pane.index)
-		states = append(states, readStateFresh(key, pane.created))
+		states = append(states, effectiveState(key, pane.created))
 	}
 	return emojiForStates(states)
 }
