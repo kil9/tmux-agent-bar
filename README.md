@@ -12,6 +12,7 @@ tmux 윈도우 이름 앞에 이모지를 붙여 Claude Code 에이전트 상태
 | --------- | --------------- | --------------------------------- |
 | 오류      | `🚨`            | 뭔가 문제가 생김 (최우선)         |
 | 승인 대기 | `💬`            | 사용자 승인을 기다리는 중         |
+| Plan 모드 | `⏸`            | Claude가 Plan 모드 실행 중        |
 | 처리 중   | `🧠(12s)`       | Claude가 thinking/작업 중 (경과 시간) |
 | 완료      | `✅`            | 작업 완료                         |
 | 없음      | ` `             | idle (Claude 없음 또는 대기 없음) |
@@ -22,11 +23,14 @@ tmux 윈도우 이름 앞에 이모지를 붙여 Claude Code 에이전트 상태
 ## 설치 및 실행
 
 ```bash
-# 빌드 (Go 1.18+ 필요)
+# 빌드 (Go 1.25+ 필요)
 go build -o tmux-agent-bar .
 ```
 
 `~/.tmux.conf`에 추가:
+
+> **참고**: 아래 설정의 `<→>`, `<←>` 위치에는 Powerline separator 문자가 들어갑니다.
+> [Nerd Fonts](https://www.nerdfonts.com/) 설치 후 실제 문자(예: `` / ``)로 교체하세요.
 
 ```
 set -g status-interval 1

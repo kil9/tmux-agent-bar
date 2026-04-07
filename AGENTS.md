@@ -103,15 +103,23 @@
 ### 핵심 동작 원리
 
 1. tmux 세션의 모든 윈도우·pane을 순회한다.
-2. 각 pane에서 Claude Code 프로세스 실행 여부 및 상태(승인 대기 / 완료 / 실행 중)를 감지한다.
-3. `tmux rename-window` 또는 tmux format hook을 이용해 윈도우 이름 앞에 이모지를 삽입한다.
+2. 각 pane에서 Claude Code 프로세스 실행 여부 및 상태를 감지한다.
+3. tmux format hook을 이용해 윈도우 이름 앞에 이모지를 삽입한다.
 
-**상태 우선순위**: `⏳` (승인 대기) > `✅` (전체 완료) > 이모지 없음 (실행 중 또는 없음)
+**상태 우선순위**: `🚨` (오류) > `💬` (승인 대기) > `⏸` (Plan 모드) > `🧠` (thinking) > `✅` (완료) > 이모지 없음 (idle)
 
 ### Claude Code 상태 감지 방법
 
-- **Claude Code hooks**: `~/.claude/settings.json`의 `Stop` / `Notification` hooks에서 `tmux-agent-bar hook <status>` 호출
+- **Claude Code hooks**: `~/.claude/settings.json` hooks에서 `tmux-agent-bar hook <status>` 호출
 - 상태는 `/tmp/tmux-agent-bar/<session>_<window>_<pane>` 파일에 기록됨
+
+| Hook 이벤트 | 전달 상태 | 결과 |
+|------------|---------|------|
+| `PreToolUse` | `thinking` | 🧠 표시, 경과 시간 카운트 시작 |
+| `PostToolUse` (Plan 블록) | `planning` | ⏸ 표시 |
+| `Notification` | `waiting` | 💬 표시 (1초 지연 후 확정) |
+| `Stop` | `done` | ✅ 표시 |
+| `SubagentStop` | `subagent_stop` | thinking 상태 연장용 타임스탬프 기록 |
 
 ### 프로젝트 구조
 
@@ -119,7 +127,6 @@
 tmux-agent-bar/
 ├── README.md
 ├── AGENTS.md
-├── PLAN.md
 ├── go.mod
 ├── main.go        # 엔트리포인트 + 모든 로직
 └── main_test.go   # 집계 로직 단위 테스트

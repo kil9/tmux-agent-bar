@@ -1,2 +1,6 @@
 tmux-agent-bar
 .claude/
+*.test
+coverage.out
+coverage.html
+*.prof
