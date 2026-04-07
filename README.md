@@ -16,8 +16,8 @@ tmux 윈도우 이름 앞에 이모지를 붙여 Claude Code 에이전트 상태
 | 완료      | `✅`            | 작업 완료                         |
 | 없음      | ` `             | idle (Claude 없음 또는 대기 없음) |
 
-`status-left`에는 창번호, hostname, 현재 디렉토리가 각각 다른 배경색 세그먼트로 표시된다.
-`status-right`에는 Claude Code 활성 시 컨텍스트 사용률+모델, 날짜, 시간이 각각 다른 배경색 세그먼트로 표시된다.
+`status-left`에는 창번호와 현재 디렉토리가 각각 다른 배경색 세그먼트로 표시된다.
+`status-right`에는 Claude Code 활성 시 컨텍스트 사용률+모델이 별도 세그먼트로, 날짜와 시간이 하나의 세그먼트로 표시된다.
 
 ## 설치 및 실행
 
@@ -33,13 +33,13 @@ set -g status-interval 1
 set -g window-status-format "#(tmux-agent-bar status #{window_index})#I #W"
 set -g window-status-current-format "#(tmux-agent-bar status #{window_index})#I #W"
 
-# status-left: [창번호|노랑-초록] [hostname|회색] [디렉토리|스틸틸]
-set -g status-left "#[fg=colour16,bg=colour148,bold] #I:#P #[fg=colour148,bg=colour241]<→>#[fg=colour231,bg=colour241] #H #[fg=colour241,bg=colour66]<→>#[fg=colour231,bg=colour66] #{b:pane_current_path} #[fg=colour66,bg=colour234]<→>"
-set -g status-left-length 60
+# status-left: [창번호|노랑-초록] [디렉토리|회색]
+set -g status-left "#[fg=colour16,bg=colour148,bold]  #I:#P #[fg=colour148,bg=colour241]<→>#[fg=colour231,bg=colour241] #{b:pane_current_path} #[fg=colour241,bg=colour234]<→>"
+set -g status-left-length 40
 
-# status-right: [ctx%+model|회색, Claude 활성 시] [날짜|스틸틸] [시간|다크시안]
+# status-right: [ctx%+model|회색, Claude 활성 시] [날짜+시간|노랑-초록]
 # claude-right가 비활성 시에도 날짜 세그먼트 진입 화살표를 출력함
-set -g status-right "#(tmux-agent-bar claude-right #{pane_id})#[fg=colour231,bg=colour66]  %m/%d #[fg=colour23,bg=colour66]<←>#[fg=colour231,bg=colour23]  %R "
+set -g status-right "#(tmux-agent-bar claude-right #{pane_id})#[fg=colour241,bg=colour234]<←>#[fg=colour148,bg=colour241]  %m/%d  %R "
 set -g status-right-length 60
 ```
 
@@ -69,6 +69,14 @@ set -g status-right-length 60
         "matcher": "",
         "hooks": [
           { "type": "command", "command": "tmux-agent-bar hook waiting" }
+        ]
+      }
+    ],
+    "SubagentStop": [
+      {
+        "matcher": "",
+        "hooks": [
+          { "type": "command", "command": "tmux-agent-bar hook subagent_stop" }
         ]
       }
     ]
