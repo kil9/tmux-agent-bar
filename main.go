@@ -51,10 +51,10 @@ func main() {
 // Called from Claude Code hooks.
 func runHook(status string) {
 	switch status {
-	case "thinking", "waiting", "done", "error", "subagent_stop":
+	case "thinking", "waiting", "done", "error", "subagent_stop", "planning":
 		// valid
 	default:
-		fmt.Fprintf(os.Stderr, "invalid status: %s (must be thinking|waiting|done|error|subagent_stop)\n", status)
+		fmt.Fprintf(os.Stderr, "invalid status: %s (must be thinking|waiting|done|error|subagent_stop|planning)\n", status)
 		os.Exit(1)
 	}
 
@@ -117,6 +117,21 @@ func runHook(status string) {
 		os.Remove(filepath.Join(stateDir, key+".thinking_start"))
 	}
 
+	// When entering plan mode, record a marker so that the subsequent Stop
+	// (done) hook can promote to 💬 (waiting for user approval) instead of ✅.
+	if status == "planning" {
+		_ = writePlanPending(key)
+	}
+
+	// When Stop fires after a plan was presented, show 💬 instead of ✅ so
+	// the user knows their approval is needed. Consume the marker here.
+	if status == "done" {
+		if planPendingExists(key) {
+			os.Remove(filepath.Join(stateDir, key+".plan_pending"))
+			status = "waiting"
+		}
+	}
+
 	// Only rewrite the state file when the status actually changes.
 	// Repeated PreToolUse ("thinking") calls must not update the mtime,
 	// which is used as a fallback elapsed-time source.
@@ -158,7 +173,7 @@ func cleanStaleFiles(dir, session, windowIndex string, alivePanes []string) {
 		name := e.Name()
 		// Match state files and all marker files (.meta, .thinking_start, .subagent_stop).
 		base := name
-		for _, suffix := range []string{".meta", ".thinking_start", ".subagent_stop", ".notify_pending"} {
+		for _, suffix := range []string{".meta", ".thinking_start", ".subagent_stop", ".notify_pending", ".plan_pending"} {
 			base = strings.TrimSuffix(base, suffix)
 		}
 		if strings.HasPrefix(base, prefix) && !alive[base] {
@@ -324,10 +339,11 @@ func stateKey(session, windowIndex, pane string) string {
 
 // emojiForStates returns the highest-priority emoji for the given slice of state strings.
 //
-// Priority: 🚨 (any error) > 💬 (any waiting) > 🧠 (any thinking) > ✅ (any done) > "" (all idle)
+// Priority: 🚨 (any error) > 💬 (any waiting) > ⏸ (any planning) > 🧠 (any thinking) > ✅ (any done) > "" (all idle)
 func emojiForStates(states []string) string {
 	anyError := false
 	anyWaiting := false
+	anyPlanning := false
 	anyThinking := false
 	anyDone := false
 
@@ -337,6 +353,8 @@ func emojiForStates(states []string) string {
 			anyError = true
 		case "waiting":
 			anyWaiting = true
+		case "planning":
+			anyPlanning = true
 		case "thinking":
 			anyThinking = true
 		case "done":
@@ -349,6 +367,8 @@ func emojiForStates(states []string) string {
 		return "🚨"
 	case anyWaiting:
 		return "💬"
+	case anyPlanning:
+		return "⏸"
 	case anyThinking:
 		return "🧠"
 	case anyDone:
@@ -480,6 +500,20 @@ func tmuxLastActivePaneIndex(session, windowIndex string) (string, error) {
 		return "", fmt.Errorf("no panes found")
 	}
 	return latestPane, nil
+}
+
+// writePlanPending records that a plan was presented and is awaiting user approval.
+func writePlanPending(key string) error {
+	if err := os.MkdirAll(stateDir, 0o755); err != nil {
+		return err
+	}
+	return os.WriteFile(filepath.Join(stateDir, key+".plan_pending"), nil, 0o644)
+}
+
+// planPendingExists reports whether a plan-pending marker exists for the given key.
+func planPendingExists(key string) bool {
+	_, err := os.Stat(filepath.Join(stateDir, key+".plan_pending"))
+	return err == nil
 }
 
 // writeThinkingStart records the current time as the start of a thinking session.
@@ -718,6 +752,8 @@ func installClaudeSettings() error {
 		{"Stop", "tmux-agent-bar hook done"},
 		{"Notification", "tmux-agent-bar hook waiting"},
 		{"SubagentStop", "tmux-agent-bar hook subagent_stop"},
+		{"EnterPlanMode", "tmux-agent-bar hook planning"},
+		{"ExitPlanMode", "tmux-agent-bar hook thinking"},
 	}
 
 	added := 0
