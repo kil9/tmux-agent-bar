@@ -104,20 +104,27 @@ func runHook(status string) {
 	// Notification that arrived before this hook does not promote to 💬.
 	os.Remove(filepath.Join(stateDir, key+".notify_pending"))
 
-	// When transitioning into "thinking" from a non-thinking state, record the
-	// start time so that tool-use calls (which re-trigger PreToolUse) don't
-	// reset the elapsed timer. When leaving thinking, remove the start marker.
+	// When in "thinking" state, ensure the start-time marker exists so the
+	// elapsed-time counter stays stable across repeated PreToolUse calls.
+	// Check the marker file itself (not the state file) so that a stale
+	// "thinking" state left over from a previous session still gets a fresh
+	// marker.  When leaving thinking, remove the marker.
 	if status == "thinking" {
-		if readState(key) != "thinking" {
+		if _, ok := readThinkingStart(key); !ok {
 			_ = writeThinkingStart(key)
 		}
 	} else {
 		os.Remove(filepath.Join(stateDir, key+".thinking_start"))
 	}
 
-	if err := writeState(key, status); err != nil {
-		fmt.Fprintln(os.Stderr, "tmux-agent-bar hook: failed to write state:", err)
-		os.Exit(1)
+	// Only rewrite the state file when the status actually changes.
+	// Repeated PreToolUse ("thinking") calls must not update the mtime,
+	// which is used as a fallback elapsed-time source.
+	if readState(key) != status {
+		if err := writeState(key, status); err != nil {
+			fmt.Fprintln(os.Stderr, "tmux-agent-bar hook: failed to write state:", err)
+			os.Exit(1)
+		}
 	}
 
 	// Update pane metadata (model + context usage) from hook stdin / transcript.

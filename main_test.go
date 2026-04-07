@@ -212,6 +212,34 @@ func TestThinkingStateMtimePreserved(t *testing.T) {
 	}
 }
 
+// TestThinkingStartMarkerCreatedFromStaleState verifies that the thinking
+// start marker is created even when the state file already contains "thinking"
+// (stale from a previous session). The guard should check marker existence,
+// not state file content.
+func TestThinkingStartMarkerCreatedFromStaleState(t *testing.T) {
+	dir := t.TempDir()
+	setStateDirForTest(t, dir)
+
+	key := "sess_1_0"
+
+	// Simulate stale state: file says "thinking" but no .thinking_start marker.
+	if err := writeState(key, "thinking"); err != nil {
+		t.Fatal(err)
+	}
+
+	// The guard checks readThinkingStart (marker existence), not readState.
+	if _, ok := readThinkingStart(key); !ok {
+		if err := writeThinkingStart(key); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	// Marker must exist now.
+	if _, ok := readThinkingStart(key); !ok {
+		t.Error("thinking_start marker was not created for stale thinking state")
+	}
+}
+
 // TestSelectThinkingTime verifies that selectThinkingTime picks the correct pane.
 func TestSelectThinkingTime(t *testing.T) {
 	t0 := time.Now().Add(-30 * time.Second)
