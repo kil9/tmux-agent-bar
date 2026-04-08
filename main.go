@@ -206,7 +206,15 @@ func runStatus(windowIndex string) {
 	if emoji == "🧠" {
 		if start, ok := thinkingStartTime(session, windowIndex); ok {
 			elapsed := int(time.Since(start).Seconds())
-			emoji += fmt.Sprintf("#[fg=colour8](%ds)#[fg=default]", elapsed)
+			var timeStr string
+			if elapsed >= 3600 {
+				timeStr = fmt.Sprintf("%dh%dm%ds", elapsed/3600, (elapsed%3600)/60, elapsed%60)
+			} else if elapsed >= 60 {
+				timeStr = fmt.Sprintf("%dm%ds", elapsed/60, elapsed%60)
+			} else {
+				timeStr = fmt.Sprintf("%ds", elapsed)
+			}
+			emoji += fmt.Sprintf("#[fg=colour8](%s)#[fg=default]", timeStr)
 		}
 	}
 
