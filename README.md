@@ -34,7 +34,7 @@ tmux 윈도우 이름 앞에 이모지를 붙여 Claude Code 에이전트 상태
 
 ```bash
 # 빌드 (Go 1.25+ 필요)
-go build -o tmux-agent-bar .
+make build
 ```
 
 `~/.tmux.conf`에 추가:

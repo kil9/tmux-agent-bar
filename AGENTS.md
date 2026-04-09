@@ -134,7 +134,7 @@ tmux-agent-bar/
 ### 빌드/실행/테스트 명령어
 
 ```bash
-go build -o tmux-agent-bar .        # 빌드
+make build                          # 빌드
 go test ./...                       # 테스트
 ./tmux-agent-bar hook waiting       # 현재 pane 상태를 waiting으로 기록
 ./tmux-agent-bar hook done          # 현재 pane 상태를 done으로 기록
