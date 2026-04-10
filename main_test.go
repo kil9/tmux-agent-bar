@@ -65,8 +65,8 @@ func TestDeferredNotify_freshMarkerKeepsThinking(t *testing.T) {
 	}
 
 	emoji := aggregateWindowEmojiFromDir(dir, "sess", "1", []string{"0"})
-	if emoji != "🧠" {
-		t.Errorf("got %q, want 🧠 (fresh marker should not promote)", emoji)
+	if emoji != "🤖" {
+		t.Errorf("got %q, want 🤖 (fresh marker should not promote)", emoji)
 	}
 }
 
@@ -106,8 +106,8 @@ func TestAggregateWindowEmoji_anyThinking(t *testing.T) {
 	writeStateToDir(t, dir, "sess_1_1", "done")
 
 	emoji := aggregateWindowEmojiFromDir(dir, "sess", "1", []string{"0", "1"})
-	if emoji != "🧠" {
-		t.Errorf("got %q, want 🧠", emoji)
+	if emoji != "🤖" {
+		t.Errorf("got %q, want 🤖", emoji)
 	}
 }
 

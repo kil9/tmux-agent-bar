@@ -105,7 +105,7 @@
 2. 각 pane에서 Claude Code 프로세스 실행 여부 및 상태를 감지한다.
 3. tmux format hook을 이용해 윈도우 이름 앞에 이모지를 삽입한다.
 
-**상태 우선순위**: `🚨` (오류) > `💬` (승인 대기) > `⏸` (Plan 모드) > `🧠` (thinking) > `✅` (완료) > 이모지 없음 (idle)
+**상태 우선순위**: `🚨` (오류) > `💬` (승인 대기) > `⏸` (Plan 모드) > `🤖` (thinking) > `✅` (완료) > 이모지 없음 (idle)
 
 ### Claude Code 상태 감지 방법
 
@@ -114,7 +114,7 @@
 
 | Hook 이벤트 | 전달 상태 | 결과 |
 |------------|---------|------|
-| `PreToolUse` | `thinking` | 🧠 표시, 경과 시간 카운트 시작 |
+| `PreToolUse` | `thinking` | 🤖 표시, 경과 시간 카운트 시작 |
 | `PostToolUse` (Plan 블록) | `planning` | ⏸ 표시 |
 | `Notification` | `waiting` | 💬 표시 (1초 지연 후 확정) |
 | `Stop` | `done` | ✅ 표시 |

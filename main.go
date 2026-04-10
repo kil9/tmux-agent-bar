@@ -203,7 +203,7 @@ func runStatus(windowIndex string) {
 	}
 
 	// For thinking state, append elapsed time in dimmed color.
-	if emoji == "🧠" {
+	if emoji == "🤖" {
 		if start, ok := thinkingStartTime(session, windowIndex); ok {
 			elapsed := int(time.Since(start).Seconds())
 			var timeStr string
@@ -378,7 +378,7 @@ func emojiForStates(states []string) string {
 	case anyPlanning:
 		return "⏸"
 	case anyThinking:
-		return "🧠"
+		return "🤖"
 	case anyDone:
 		return "✅"
 	default:
