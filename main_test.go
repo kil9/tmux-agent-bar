@@ -1,8 +1,10 @@
 package main
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -65,8 +67,8 @@ func TestDeferredNotify_freshMarkerKeepsThinking(t *testing.T) {
 	}
 
 	emoji := aggregateWindowEmojiFromDir(dir, "sess", "1", []string{"0"})
-	if emoji != "✳️" {
-		t.Errorf("got %q, want ✳️ (fresh marker should not promote)", emoji)
+	if emoji != "🤖" {
+		t.Errorf("got %q, want 🤖 (fresh marker should not promote)", emoji)
 	}
 }
 
@@ -106,8 +108,8 @@ func TestAggregateWindowEmoji_anyThinking(t *testing.T) {
 	writeStateToDir(t, dir, "sess_1_1", "done")
 
 	emoji := aggregateWindowEmojiFromDir(dir, "sess", "1", []string{"0", "1"})
-	if emoji != "✳️" {
-		t.Errorf("got %q, want ✳️", emoji)
+	if emoji != "🤖" {
+		t.Errorf("got %q, want 🤖", emoji)
 	}
 }
 
@@ -286,7 +288,133 @@ func TestSelectThinkingTime(t *testing.T) {
 	})
 }
 
+func TestReadTranscriptMeta_directFormat(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "transcript.jsonl")
+	line := transcriptLine{Role: "assistant", Model: "claude-sonnet-4-6"}
+	line.Usage.InputTokens = 1000
+	line.Usage.CacheReadInputTokens = 2000
+	line.Usage.CacheCreationInputTokens = 500
+	writeJSONL(t, path, line)
+
+	meta, ok := readTranscriptMetaImpl(path)
+	if !ok {
+		t.Fatal("expected ok=true")
+	}
+	if meta.Model != "claude-sonnet-4-6" {
+		t.Errorf("model: got %q, want %q", meta.Model, "claude-sonnet-4-6")
+	}
+	if meta.InputTokens != 3500 {
+		t.Errorf("tokens: got %d, want 3500", meta.InputTokens)
+	}
+}
+
+func TestReadTranscriptMeta_wrappedFormat(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "transcript.jsonl")
+	entry := transcriptLine{}
+	entry.Message.Role = "assistant"
+	entry.Message.Model = "claude-opus-4-6"
+	entry.Message.Usage.InputTokens = 5000
+	entry.Message.Usage.CacheReadInputTokens = 3000
+	writeJSONL(t, path, entry)
+
+	meta, ok := readTranscriptMetaImpl(path)
+	if !ok {
+		t.Fatal("expected ok=true")
+	}
+	if meta.Model != "claude-opus-4-6" {
+		t.Errorf("model: got %q, want %q", meta.Model, "claude-opus-4-6")
+	}
+	if meta.InputTokens != 8000 {
+		t.Errorf("tokens: got %d, want 8000", meta.InputTokens)
+	}
+}
+
+func TestReadTranscriptMeta_picksLastAssistant(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "transcript.jsonl")
+
+	old := transcriptLine{Role: "assistant", Model: "claude-haiku-4-5"}
+	old.Usage.InputTokens = 100
+
+	user := transcriptLine{Role: "user"}
+
+	latest := transcriptLine{Role: "assistant", Model: "claude-sonnet-4-6"}
+	latest.Usage.InputTokens = 9000
+
+	writeJSONL(t, path, old, user, latest)
+
+	meta, ok := readTranscriptMetaImpl(path)
+	if !ok {
+		t.Fatal("expected ok=true")
+	}
+	if meta.Model != "claude-sonnet-4-6" {
+		t.Errorf("model: got %q, want %q (should pick last assistant)", meta.Model, "claude-sonnet-4-6")
+	}
+	if meta.InputTokens != 9000 {
+		t.Errorf("tokens: got %d, want 9000", meta.InputTokens)
+	}
+}
+
+func TestReadTranscriptMeta_emptyFile(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "transcript.jsonl")
+	os.WriteFile(path, nil, 0o644)
+
+	_, ok := readTranscriptMetaImpl(path)
+	if ok {
+		t.Error("expected ok=false for empty file")
+	}
+}
+
+func TestReadTranscriptMeta_missingFile(t *testing.T) {
+	_, ok := readTranscriptMetaImpl(filepath.Join(t.TempDir(), "nonexistent.jsonl"))
+	if ok {
+		t.Error("expected ok=false for missing file")
+	}
+}
+
+func TestReadTranscriptMeta_largeTail(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "transcript.jsonl")
+
+	// Write a target line, then >64KB of padding, then another assistant line.
+	// Only the last assistant line (in the 64KB tail) should be returned.
+	early := transcriptLine{Role: "assistant", Model: "early-model"}
+	early.Usage.InputTokens = 1
+
+	tail := transcriptLine{Role: "assistant", Model: "tail-model"}
+	tail.Usage.InputTokens = 42
+
+	earlyJSON, _ := json.Marshal(early)
+	tailJSON, _ := json.Marshal(tail)
+
+	// Build: early line + 70KB padding (non-JSON lines) + tail line
+	padding := strings.Repeat("x", 70*1024) + "\n"
+	content := string(earlyJSON) + "\n" + padding + string(tailJSON) + "\n"
+	os.WriteFile(path, []byte(content), 0o644)
+
+	meta, ok := readTranscriptMetaImpl(path)
+	if !ok {
+		t.Fatal("expected ok=true")
+	}
+	if meta.Model != "tail-model" {
+		t.Errorf("model: got %q, want %q (should read from 64KB tail)", meta.Model, "tail-model")
+	}
+}
+
 // --- helpers ---
+
+func writeJSONL(t *testing.T, path string, lines ...transcriptLine) {
+	t.Helper()
+	var parts []string
+	for _, line := range lines {
+		data, err := json.Marshal(line)
+		if err != nil {
+			t.Fatal(err)
+		}
+		parts = append(parts, string(data))
+	}
+	if err := os.WriteFile(path, []byte(strings.Join(parts, "\n")+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+}
 
 func writeStateToDir(t *testing.T, dir, key, status string) {
 	t.Helper()

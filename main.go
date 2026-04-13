@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -15,6 +16,12 @@ import (
 var stateDir = "/tmp/tmux-agent-bar"
 
 func main() {
+	// Hard deadline: die rather than hang tmux.
+	go func() {
+		time.Sleep(3 * time.Second)
+		os.Exit(124)
+	}()
+
 	if len(os.Args) < 2 {
 		fmt.Fprintln(os.Stderr, "usage: tmux-agent-bar <hook|status|claude-right|install> [args...]")
 		os.Exit(1)
@@ -58,16 +65,16 @@ func runHook(status string) {
 		os.Exit(1)
 	}
 
-	// Read hook stdin early — stdin can only be read once.
-	hookData, _ := parseHookStdin()
-
-	// Get session_window_pane key from tmux.
 	// TMUX_PANE is set when inside a tmux pane (e.g. %3).
+	// Check before reading stdin to avoid unnecessary blocking outside tmux.
 	paneID := os.Getenv("TMUX_PANE")
 	if paneID == "" {
 		// Not inside tmux — silently exit.
 		return
 	}
+
+	// Read hook stdin — stdin can only be read once.
+	hookData, _ := parseHookStdin()
 
 	key, err := tmuxPaneKey(paneID)
 	if err != nil {
@@ -203,7 +210,7 @@ func runStatus(windowIndex string) {
 	}
 
 	// For thinking state, append elapsed time in dimmed color.
-	if emoji == "✳️" {
+	if emoji == "🤖" {
 		if start, ok := thinkingStartTime(session, windowIndex); ok {
 			elapsed := int(time.Since(start).Seconds())
 			var timeStr string
@@ -347,7 +354,7 @@ func stateKey(session, windowIndex, pane string) string {
 
 // emojiForStates returns the highest-priority emoji for the given slice of state strings.
 //
-// Priority: 🚨 (any error) > 💬 (any waiting) > ⏸ (any planning) > ✳️ (any thinking) > ✅ (any done) > "" (all idle)
+// Priority: 🚨 (any error) > 💬 (any waiting) > ⏸ (any planning) > 🤖 (any thinking) > ✅ (any done) > "" (all idle)
 func emojiForStates(states []string) string {
 	anyError := false
 	anyWaiting := false
@@ -378,7 +385,7 @@ func emojiForStates(states []string) string {
 	case anyPlanning:
 		return "⏸"
 	case anyThinking:
-		return "✳️"
+		return "🤖"
 	case anyDone:
 		return "✅"
 	default:
@@ -386,9 +393,18 @@ func emojiForStates(states []string) string {
 	}
 }
 
+// tmuxCommand runs a tmux subcommand with a 500ms timeout.
+// If the tmux server is slow or unresponsive, the command is killed
+// rather than blocking the caller (and, transitively, tmux itself).
+func tmuxCommand(args ...string) ([]byte, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
+	defer cancel()
+	return exec.CommandContext(ctx, "tmux", args...).Output()
+}
+
 // tmuxPaneKey returns "<session>_<window>_<pane>" for the given pane ID.
 func tmuxPaneKey(paneID string) (string, error) {
-	out, err := exec.Command("tmux", "display-message", "-p", "-t", paneID, "#S_#I_#P").Output()
+	out, err := tmuxCommand("display-message", "-p", "-t", paneID, "#S_#I_#P")
 	if err != nil {
 		return "", err
 	}
@@ -397,7 +413,7 @@ func tmuxPaneKey(paneID string) (string, error) {
 
 // tmuxCurrentWindowIndex returns the index of the currently active window.
 func tmuxCurrentWindowIndex() (string, error) {
-	out, err := exec.Command("tmux", "display-message", "-p", "#I").Output()
+	out, err := tmuxCommand("display-message", "-p", "#I")
 	if err != nil {
 		return "", err
 	}
@@ -424,7 +440,7 @@ func clearViewedStates(session, windowIndex string) {
 
 // tmuxCurrentSession returns the name of the current tmux session.
 func tmuxCurrentSession() (string, error) {
-	out, err := exec.Command("tmux", "display-message", "-p", "#S").Output()
+	out, err := tmuxCommand("display-message", "-p", "#S")
 	if err != nil {
 		return "", err
 	}
@@ -454,7 +470,7 @@ func tmuxListPanes(session, windowIndex string) ([]string, error) {
 // timestamps for the given session and window.
 func tmuxListPanesWithCreated(session, windowIndex string) ([]paneCreated, error) {
 	target := session + ":" + windowIndex
-	raw, err := exec.Command("tmux", "list-panes", "-t", target, "-F", "#{pane_index} #{pane_created}").Output()
+	raw, err := tmuxCommand("list-panes", "-t", target, "-F", "#{pane_index} #{pane_created}")
 	if err != nil {
 		return nil, err
 	}
@@ -480,7 +496,7 @@ func tmuxListPanesWithCreated(session, windowIndex string) ([]paneCreated, error
 // pane in the given session/window, based on tmux's pane_last_activity timestamp.
 func tmuxLastActivePaneIndex(session, windowIndex string) (string, error) {
 	target := session + ":" + windowIndex
-	out, err := exec.Command("tmux", "list-panes", "-t", target, "-F", "#{pane_last_activity} #{pane_index}").Output()
+	out, err := tmuxCommand("list-panes", "-t", target, "-F", "#{pane_last_activity} #{pane_index}")
 	if err != nil {
 		return "", err
 	}
@@ -852,16 +868,31 @@ type transcriptLine struct {
 
 // parseHookStdin reads and parses the JSON payload from Claude Code hook stdin.
 // Returns a zero-value hookStdin and an error if stdin cannot be parsed.
+// Uses a 2-second timeout to avoid hanging if the caller never closes stdin.
 func parseHookStdin() (hookStdin, error) {
-	data, err := io.ReadAll(os.Stdin)
-	if err != nil || len(data) == 0 {
-		return hookStdin{}, fmt.Errorf("empty stdin")
+	type readResult struct {
+		data []byte
+		err  error
 	}
-	var h hookStdin
-	if err := json.Unmarshal(data, &h); err != nil {
-		return hookStdin{}, err
+	ch := make(chan readResult, 1)
+	go func() {
+		data, err := io.ReadAll(os.Stdin)
+		ch <- readResult{data, err}
+	}()
+
+	select {
+	case r := <-ch:
+		if r.err != nil || len(r.data) == 0 {
+			return hookStdin{}, fmt.Errorf("empty stdin")
+		}
+		var h hookStdin
+		if err := json.Unmarshal(r.data, &h); err != nil {
+			return hookStdin{}, err
+		}
+		return h, nil
+	case <-time.After(2 * time.Second):
+		return hookStdin{}, fmt.Errorf("stdin read timeout")
 	}
-	return h, nil
 }
 
 // resolvePaneMeta extracts model and context usage from hook data.
@@ -884,8 +915,28 @@ func resolvePaneMeta(h hookStdin) (PaneMeta, bool) {
 
 // readTranscriptMeta reads the last assistant message from a Claude Code JSONL
 // transcript file and returns the model and total context token count.
-// Reads only the last 64 KB to avoid loading large transcripts into memory.
+// Uses a 1-second timeout to avoid blocking on slow/hung filesystems (e.g. NFS).
 func readTranscriptMeta(path string) (PaneMeta, bool) {
+	type result struct {
+		meta PaneMeta
+		ok   bool
+	}
+	ch := make(chan result, 1)
+	go func() {
+		m, ok := readTranscriptMetaImpl(path)
+		ch <- result{m, ok}
+	}()
+	select {
+	case r := <-ch:
+		return r.meta, r.ok
+	case <-time.After(time.Second):
+		return PaneMeta{}, false
+	}
+}
+
+// readTranscriptMetaImpl does the actual transcript reading.
+// Reads only the last 64 KB to avoid loading large transcripts into memory.
+func readTranscriptMetaImpl(path string) (PaneMeta, bool) {
 	f, err := os.Open(path)
 	if err != nil {
 		return PaneMeta{}, false
