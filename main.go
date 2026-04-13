@@ -203,7 +203,7 @@ func runStatus(windowIndex string) {
 	}
 
 	// For thinking state, append elapsed time in dimmed color.
-	if emoji == "🤖" {
+	if emoji == "✳️" {
 		if start, ok := thinkingStartTime(session, windowIndex); ok {
 			elapsed := int(time.Since(start).Seconds())
 			var timeStr string
@@ -347,7 +347,7 @@ func stateKey(session, windowIndex, pane string) string {
 
 // emojiForStates returns the highest-priority emoji for the given slice of state strings.
 //
-// Priority: 🚨 (any error) > 💬 (any waiting) > ⏸ (any planning) > 🧠 (any thinking) > ✅ (any done) > "" (all idle)
+// Priority: 🚨 (any error) > 💬 (any waiting) > ⏸ (any planning) > ✳️ (any thinking) > ✅ (any done) > "" (all idle)
 func emojiForStates(states []string) string {
 	anyError := false
 	anyWaiting := false
@@ -378,7 +378,7 @@ func emojiForStates(states []string) string {
 	case anyPlanning:
 		return "⏸"
 	case anyThinking:
-		return "🤖"
+		return "✳️"
 	case anyDone:
 		return "✅"
 	default:
