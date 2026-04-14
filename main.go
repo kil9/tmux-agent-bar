@@ -16,9 +16,20 @@ import (
 var stateDir = "/tmp/tmux-agent-bar"
 
 func main() {
-	// Hard deadline: die rather than hang tmux.
+	// Hard deadline: must finish within one status-interval (1 s).
+	// On timeout, print a fallback so the status bar stays informative.
+	subcmd := ""
+	if len(os.Args) >= 2 {
+		subcmd = os.Args[1]
+	}
 	go func() {
-		time.Sleep(3 * time.Second)
+		time.Sleep(900 * time.Millisecond)
+		switch subcmd {
+		case "status":
+			fmt.Print("⏳")
+		case "claude-right":
+			fmt.Printf("#[fg=colour66,bg=colour234]\ue0ba")
+		}
 		os.Exit(124)
 	}()
 
@@ -397,7 +408,7 @@ func emojiForStates(states []string) string {
 // If the tmux server is slow or unresponsive, the command is killed
 // rather than blocking the caller (and, transitively, tmux itself).
 func tmuxCommand(args ...string) ([]byte, error) {
-	ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
+	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
 	defer cancel()
 	return exec.CommandContext(ctx, "tmux", args...).Output()
 }
@@ -890,7 +901,7 @@ func parseHookStdin() (hookStdin, error) {
 			return hookStdin{}, err
 		}
 		return h, nil
-	case <-time.After(2 * time.Second):
+	case <-time.After(500 * time.Millisecond):
 		return hookStdin{}, fmt.Errorf("stdin read timeout")
 	}
 }
@@ -929,7 +940,7 @@ func readTranscriptMeta(path string) (PaneMeta, bool) {
 	select {
 	case r := <-ch:
 		return r.meta, r.ok
-	case <-time.After(time.Second):
+	case <-time.After(500 * time.Millisecond):
 		return PaneMeta{}, false
 	}
 }
