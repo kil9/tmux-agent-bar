@@ -115,7 +115,7 @@
 | Hook 이벤트 | 전달 상태 | 결과 |
 |------------|---------|------|
 | `PreToolUse` | `thinking` | 🤖 표시, 경과 시간 카운트 시작 |
-| `PostToolUse` (Plan 블록) | `planning` | ⏸ 표시 |
+| `PreToolUse` (`matcher: ExitPlanMode`) | `planning` | ⏸ 표시 (plan 제출 시점) |
 | `Notification` | `waiting` | 💬 표시 (1초 지연 후 확정) |
 | `Stop` | `done` | ✅ 표시 |
 | `SubagentStop` | `subagent_stop` | thinking 상태 연장용 타임스탬프 기록 |

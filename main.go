@@ -770,9 +770,9 @@ func installClaudeSettings() error {
 		return false
 	}
 
-	addHook := func(event, cmd string) {
+	addHook := func(event, matcher, cmd string) {
 		entry := map[string]any{
-			"matcher": "",
+			"matcher": matcher,
 			"hooks": []map[string]any{
 				{"type": "command", "command": cmd},
 			},
@@ -781,21 +781,24 @@ func installClaudeSettings() error {
 		hooks[event] = append(existing, entry)
 	}
 
-	type hookDef struct{ event, cmd string }
+	type hookDef struct{ event, matcher, cmd string }
 	wanted := []hookDef{
-		{"PreToolUse", "tmux-agent-bar hook thinking"},
-		{"Stop", "tmux-agent-bar hook done"},
-		{"Notification", "tmux-agent-bar hook waiting"},
-		{"SubagentStop", "tmux-agent-bar hook subagent_stop"},
-		{"EnterPlanMode", "tmux-agent-bar hook planning"},
-		{"ExitPlanMode", "tmux-agent-bar hook thinking"},
-		{"UserPromptSubmit", "tmux-agent-bar hook thinking"},
+		{"PreToolUse", "", "tmux-agent-bar hook thinking"},
+		// Plan mode: the ExitPlanMode tool is what an agent calls to present a
+		// plan for approval, so flip to ⏸ when it fires. The generic PreToolUse
+		// entry above runs first and sets thinking; this matched entry runs
+		// after and overwrites the state file with planning.
+		{"PreToolUse", "ExitPlanMode", "tmux-agent-bar hook planning"},
+		{"Stop", "", "tmux-agent-bar hook done"},
+		{"Notification", "", "tmux-agent-bar hook waiting"},
+		{"SubagentStop", "", "tmux-agent-bar hook subagent_stop"},
+		{"UserPromptSubmit", "", "tmux-agent-bar hook thinking"},
 	}
 
 	added := 0
 	for _, h := range wanted {
 		if !eventHasCmd(h.event, h.cmd) {
-			addHook(h.event, h.cmd)
+			addHook(h.event, h.matcher, h.cmd)
 			added++
 		}
 	}
