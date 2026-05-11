@@ -1,4 +1,5 @@
 tmux-agent-bar
+*.exe
 .claude/
 *.test
 coverage.out
