@@ -89,8 +89,10 @@ func runHook(status string) {
 
 	key, err := tmuxPaneKey(paneID)
 	if err != nil {
-		fmt.Fprintln(os.Stderr, "tmux-agent-bar hook: failed to get pane info:", err)
-		os.Exit(1)
+		// tmux unavailable or pane lookup failed (e.g. TMUX_PANE set by a
+		// tmux-clone like psmux that doesn't support display-message).
+		// Treat the same as "not in tmux" and exit silently.
+		return
 	}
 
 	// SubagentStop: record a timestamp (used only for cleanup; no longer needed
