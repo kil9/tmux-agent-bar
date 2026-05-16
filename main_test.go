@@ -399,6 +399,103 @@ func TestReadTranscriptMeta_largeTail(t *testing.T) {
 	}
 }
 
+// TestThinkingTTL_freshStateShows verifies that a recent "thinking" state is shown.
+func TestThinkingTTL_freshStateShows(t *testing.T) {
+	dir := t.TempDir()
+	setStateDirForTest(t, dir)
+
+	key := "sess_1_0"
+	writeStateToDir(t, dir, key, "thinking")
+
+	got := readStateFresh(key, time.Time{})
+	if got != "thinking" {
+		t.Errorf("got %q, want %q (fresh thinking should be visible)", got, "thinking")
+	}
+}
+
+// TestThinkingTTL_expiredStateHidden verifies that an old "thinking" state
+// (older than thinkingTTL) is treated as stale and returns "".
+func TestThinkingTTL_expiredStateHidden(t *testing.T) {
+	dir := t.TempDir()
+	setStateDirForTest(t, dir)
+
+	key := "sess_1_0"
+	writeStateToDir(t, dir, key, "thinking")
+	// Back-date the state file past thinkingTTL.
+	old := time.Now().Add(-(thinkingTTL + time.Minute))
+	path := filepath.Join(dir, key)
+	if err := os.Chtimes(path, old, old); err != nil {
+		t.Fatal(err)
+	}
+
+	got := readStateFresh(key, time.Time{})
+	if got != "" {
+		t.Errorf("got %q, want %q (expired thinking should be hidden)", got, "")
+	}
+}
+
+// TestThinkingTTL_expiredButThinkingStartFresh verifies that if the state file
+// is old but the thinking_start marker is recent, the state is still shown.
+func TestThinkingTTL_expiredButThinkingStartFresh(t *testing.T) {
+	dir := t.TempDir()
+	setStateDirForTest(t, dir)
+
+	key := "sess_1_0"
+	writeStateToDir(t, dir, key, "thinking")
+	// Back-date the state file past thinkingTTL.
+	old := time.Now().Add(-(thinkingTTL + time.Minute))
+	if err := os.Chtimes(filepath.Join(dir, key), old, old); err != nil {
+		t.Fatal(err)
+	}
+	// Write a fresh thinking_start marker (thinking just restarted).
+	if err := writeThinkingStart(key); err != nil {
+		t.Fatal(err)
+	}
+
+	got := readStateFresh(key, time.Time{})
+	if got != "thinking" {
+		t.Errorf("got %q, want %q (fresh thinking_start should override expired state file)", got, "thinking")
+	}
+}
+
+// TestThinkingTTL_nonThinkingUnaffected verifies that TTL expiry only applies
+// to "thinking" state, not other states like "done" or "waiting".
+func TestThinkingTTL_nonThinkingUnaffected(t *testing.T) {
+	dir := t.TempDir()
+	setStateDirForTest(t, dir)
+
+	for _, state := range []string{"done", "waiting", "error", "planning"} {
+		key := "sess_1_0"
+		writeStateToDir(t, dir, key, state)
+		old := time.Now().Add(-(thinkingTTL + time.Minute))
+		if err := os.Chtimes(filepath.Join(dir, key), old, old); err != nil {
+			t.Fatal(err)
+		}
+		got := readStateFresh(key, time.Time{})
+		if got != state {
+			t.Errorf("state %q: got %q, want %q (TTL should not affect non-thinking states)", state, got, state)
+		}
+		os.Remove(filepath.Join(dir, key))
+	}
+}
+
+// TestProcStartTime verifies that procStartTime returns a non-zero time for
+// the current process.
+func TestProcStartTime(t *testing.T) {
+	pid := os.Getpid()
+	got, ok := procStartTime(pid)
+	if !ok {
+		t.Skip("procStartTime not supported on this platform")
+	}
+	if got.IsZero() {
+		t.Error("procStartTime returned zero time for current process")
+	}
+	// The process start time must be in the past.
+	if !got.Before(time.Now()) {
+		t.Errorf("procStartTime returned future time: %v", got)
+	}
+}
+
 // --- helpers ---
 
 func writeJSONL(t *testing.T, path string, lines ...transcriptLine) {

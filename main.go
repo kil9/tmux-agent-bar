@@ -15,6 +15,10 @@ import (
 
 var stateDir = "/tmp/tmux-agent-bar"
 
+// thinkingTTL is the maximum duration a "thinking" state is retained before it
+// is treated as stale. Handles Claude Code killed without firing the Stop hook.
+const thinkingTTL = 2 * time.Hour
+
 func main() {
 	// Hard deadline: must finish within one status-interval (1 s).
 	// On timeout, print a fallback so the status bar stays informative.
@@ -481,9 +485,11 @@ func tmuxListPanes(session, windowIndex string) ([]string, error) {
 
 // tmuxListPanesWithCreated returns pane indices together with their creation
 // timestamps for the given session and window.
+// It reads #{pane_created} first; if that is empty (some tmux builds don't
+// populate it), it falls back to the pane PID's start time from /proc.
 func tmuxListPanesWithCreated(session, windowIndex string) ([]paneCreated, error) {
 	target := session + ":" + windowIndex
-	raw, err := tmuxCommand("list-panes", "-t", target, "-F", "#{pane_index} #{pane_created}")
+	raw, err := tmuxCommand("list-panes", "-t", target, "-F", "#{pane_index}\t#{pane_created}\t#{pane_pid}")
 	if err != nil {
 		return nil, err
 	}
@@ -493,16 +499,75 @@ func tmuxListPanesWithCreated(session, windowIndex string) ([]paneCreated, error
 		if line == "" {
 			continue
 		}
-		parts := strings.SplitN(line, " ", 2)
-		pc := paneCreated{index: parts[0]}
-		if len(parts) == 2 {
-			if ts, err := strconv.ParseInt(parts[1], 10, 64); err == nil {
+		fields := strings.SplitN(line, "\t", 3)
+		pc := paneCreated{index: fields[0]}
+		if len(fields) >= 2 {
+			if ts, err := strconv.ParseInt(strings.TrimSpace(fields[1]), 10, 64); err == nil && ts > 0 {
 				pc.created = time.Unix(ts, 0)
+			}
+		}
+		// pane_created unavailable (empty or zero): fall back to pane PID start time.
+		if pc.created.IsZero() && len(fields) == 3 {
+			if pid, err := strconv.Atoi(strings.TrimSpace(fields[2])); err == nil && pid > 0 {
+				if t, ok := procStartTime(pid); ok {
+					pc.created = t
+				}
 			}
 		}
 		panes = append(panes, pc)
 	}
 	return panes, nil
+}
+
+// procStartTime returns the start time of the process with the given PID by
+// reading /proc/<pid>/stat. Returns (zero, false) on any error or non-Linux systems.
+func procStartTime(pid int) (time.Time, bool) {
+	data, err := os.ReadFile(fmt.Sprintf("/proc/%d/stat", pid))
+	if err != nil {
+		return time.Time{}, false
+	}
+	// /proc/<pid>/stat fields are space-separated; field 22 (0-indexed: 21) is
+	// starttime in clock ticks since boot. We also need /proc/stat btime (boot time).
+	//
+	// Format: pid (comm) state ppid ... starttime ...
+	// The comm field may contain spaces and parentheses, so find the last ')' first.
+	s := string(data)
+	rp := strings.LastIndex(s, ")")
+	if rp < 0 {
+		return time.Time{}, false
+	}
+	rest := strings.TrimSpace(s[rp+1:])
+	fields := strings.Fields(rest)
+	// After stripping "pid (comm)", field index 19 is starttime (field 22 overall, 0-indexed 21).
+	// Fields after ')': [state ppid pgrp session tty_nr tpgid flags minflt cminflt majflt cmajflt
+	//                    utime stime cutime cstime priority nice num_threads itrealvalue starttime ...]
+	// Index 19 = starttime (0-based after the ')' remainder).
+	if len(fields) < 20 {
+		return time.Time{}, false
+	}
+	startTicks, err := strconv.ParseInt(fields[19], 10, 64)
+	if err != nil {
+		return time.Time{}, false
+	}
+	// Read boot time from /proc/stat.
+	btimeData, err := os.ReadFile("/proc/stat")
+	if err != nil {
+		return time.Time{}, false
+	}
+	var btime int64
+	for _, line := range strings.Split(string(btimeData), "\n") {
+		if strings.HasPrefix(line, "btime ") {
+			btime, _ = strconv.ParseInt(strings.TrimSpace(strings.TrimPrefix(line, "btime ")), 10, 64)
+			break
+		}
+	}
+	if btime == 0 {
+		return time.Time{}, false
+	}
+	// USER_HZ is 100 on Linux/x86 (virtually always).
+	const userHz = 100
+	startSec := btime + startTicks/userHz
+	return time.Unix(startSec, 0), true
 }
 
 // tmuxLastActivePaneIndex returns the pane_index of the most recently activated
@@ -653,6 +718,8 @@ func readState(key string) string {
 // readStateFresh reads the status for the given key, but returns "" when the
 // state file's mtime predates `after` (meaning the file was written in a
 // previous pane lifetime and is now stale). Pass a zero time to skip the check.
+// "thinking" state older than thinkingTTL is also treated as stale, so that a
+// dead Claude Code session (Stop hook never fired) doesn't show 🤖 forever.
 func readStateFresh(key string, after time.Time) string {
 	path := filepath.Join(stateDir, key)
 	info, err := os.Stat(path)
@@ -666,7 +733,18 @@ func readStateFresh(key string, after time.Time) string {
 	if err != nil {
 		return ""
 	}
-	return strings.TrimSpace(string(data))
+	state := strings.TrimSpace(string(data))
+	if state == "thinking" {
+		// Use thinking_start marker for accurate elapsed time; fall back to state file mtime.
+		startTime := info.ModTime()
+		if t, ok := readThinkingStart(key); ok {
+			startTime = t
+		}
+		if time.Since(startTime) > thinkingTTL {
+			return "" // expired — Claude Code was likely killed without Stop hook
+		}
+	}
+	return state
 }
 
 // runInstall configures ~/.tmux.conf and ~/.claude/settings.json.
