@@ -80,16 +80,15 @@
 ## 커밋 및 풀 리퀘스트 규칙
 
 - 사용자의 명시적인 요청이 있기 전까지는 커밋하지 않는다.
-- 커밋을 요청받았을 때는 `AGENTS.md`, `README.md`, `PLAN.md`의 업데이트가 필요한지 검토하고, 필요하면 함께 업데이트한다.
-- 푸시는 항상 모든 remote(`gh`, `origin` 등 `git remote`에 등록된 전체)에 수행한다.
+- 커밋을 요청받았을 때는 `README.md`, `AGENTS.md`, `PLAN.md`의 업데이트가 필요한지 검토하고, 필요하면 함께 업데이트한다.
+- 푸시 시 `origin`과 `github` 리모트 양쪽에 모두 푸시한다.
+- 기본 브랜치에 직접 푸시하지 않고 PR을 기본 절차로 사용한다. 단, 사용자가 명시적으로 직접 푸시를 요청한 경우에는 허용한다.
 - 새로운 PR은 항상 Draft로 생성한다.
 - PR 전 린트/테스트를 통과시키고, 변경 이유와 범위를 명확히 작성한다.
-- 팀 규칙이 있다면 이슈 번호 연결, 리뷰어, 체크리스트를 포함한다.
 - 커밋 메시지는 한국어로 작성한다.
-- 커밋 메시지 첫 줄에는 80자 이내로 전체 커밋 내용을 요약한다.
-- 두 번째 줄은 비워둔다.
-- 세 번째 줄부터 목록 형태로 간단하게 변경 내용을 기록한다.
-- 커밋 메시지를 길게 작성해야 할 필요가 있는 경우 목록 아래에 다시 한 줄을 띄우고 기록한다.
+- 커밋 메시지 첫 줄은 72자로 제한하며, 두 번째 줄은 비우고, 세 번째 줄부터 `*` 목록 형태(한 줄 최대 90자)로 작성한다.
+- AI 도구 사용 여부는 커밋 메시지에 포함하지 않는다.
+- 커밋 시 stage된 파일만 포함하며, 사용자가 명시적으로 요청한 경우에만 커밋한다.
 
 ---
 
@@ -114,11 +113,14 @@
 
 | Hook 이벤트 | 전달 상태 | 결과 |
 |------------|---------|------|
+| `UserPromptSubmit` | `thinking` | 🤖 표시 (프롬프트 제출 즉시) |
 | `PreToolUse` | `thinking` | 🤖 표시, 경과 시간 카운트 시작 |
 | `PreToolUse` (`matcher: ExitPlanMode`) | `planning` | ⏸ 표시 (plan 제출 시점) |
 | `Notification` | `waiting` | 💬 표시 (1초 지연 후 확정) |
 | `Stop` | `done` | ✅ 표시 |
 | `SubagentStop` | `subagent_stop` | thinking 상태 연장용 타임스탬프 기록 |
+
+`thinking` 상태는 TTL을 두어, Stop hook이 발사되지 않은 채 종료된 죽은 세션에서 🤖가 영구히 남는 것을 방지한다.
 
 ### 프로젝트 구조
 
@@ -126,19 +128,23 @@
 tmux-agent-bar/
 ├── README.md
 ├── AGENTS.md
+├── Makefile        # build / install / clean
 ├── go.mod
-├── main.go        # 엔트리포인트 + 모든 로직
-└── main_test.go   # 집계 로직 단위 테스트
+├── main.go         # 엔트리포인트 + 모든 로직
+├── main_test.go    # 집계 로직 단위 테스트
+└── screenshots/    # README용 스크린샷
 ```
 
 ### 빌드/실행/테스트 명령어
 
 ```bash
 make build                          # 빌드
+make install                        # ~/.local/bin 으로 설치
 go test ./...                       # 테스트
 ./tmux-agent-bar hook waiting       # 현재 pane 상태를 waiting으로 기록
 ./tmux-agent-bar hook done          # 현재 pane 상태를 done으로 기록
 ./tmux-agent-bar status <window>    # 윈도우 이모지 반환
+./tmux-agent-bar install            # ~/.tmux.conf + ~/.claude/settings.json 훅 등록
 ```
 
 ### 환경변수 및 런타임 플래그
