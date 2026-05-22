@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -137,6 +138,43 @@ func TestAggregateWindowEmoji_anyDone(t *testing.T) {
 	emoji := aggregateWindowEmojiFromDir(dir, "sess", "1", []string{"0", "1"})
 	if emoji != "✅" {
 		t.Errorf("got %q, want ✅", emoji)
+	}
+}
+
+func TestEmojiForStates_priority(t *testing.T) {
+	tests := []struct {
+		name   string
+		states []string
+		want   string
+	}{
+		{"all idle", []string{"", ""}, ""},
+		{"done beats idle", []string{"done", ""}, "✅"},
+		{"bg_waiting beats done", []string{"bg_waiting", "done"}, "⏳"},
+		{"thinking beats bg_waiting", []string{"thinking", "bg_waiting"}, "🤖"},
+		{"planning beats thinking", []string{"planning", "thinking", "bg_waiting"}, "⏸"},
+		{"waiting beats planning", []string{"waiting", "planning", "bg_waiting"}, "💬"},
+		{"error beats all", []string{"error", "waiting", "thinking", "bg_waiting"}, "🚨"},
+		{"only bg_waiting", []string{"bg_waiting"}, "⏳"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := emojiForStates(tc.states); got != tc.want {
+				t.Errorf("emojiForStates(%v) = %q, want %q", tc.states, got, tc.want)
+			}
+		})
+	}
+}
+
+func TestAggregateWindowEmoji_anyBgWaiting(t *testing.T) {
+	dir := t.TempDir()
+	setStateDirForTest(t, dir)
+
+	writeStateToDir(t, dir, "sess_1_0", "bg_waiting")
+	writeStateToDir(t, dir, "sess_1_1", "done")
+
+	emoji := aggregateWindowEmojiFromDir(dir, "sess", "1", []string{"0", "1"})
+	if emoji != "⏳" {
+		t.Errorf("got %q, want ⏳ (bg_waiting beats done)", emoji)
 	}
 }
 
@@ -493,6 +531,165 @@ func TestProcStartTime(t *testing.T) {
 	// The process start time must be in the past.
 	if !got.Before(time.Now()) {
 		t.Errorf("procStartTime returned future time: %v", got)
+	}
+}
+
+// --- bg_waiting auto-idle transition ---
+
+func TestResolvePaneStateOrClear_bgWaitingChildAlive(t *testing.T) {
+	dir := t.TempDir()
+	setStateDirForTest(t, dir)
+	root := t.TempDir()
+	setProcRootForTest(t, root)
+
+	// pane shell → claude → child still alive
+	writeFakeProc(t, root, 5000, "bash", []int{5001})
+	writeFakeProc(t, root, 5001, "claude", []int{5002})
+	writeFakeProc(t, root, 5002, "sleep", nil)
+	writeStateToDir(t, dir, "sess_1_0", "bg_waiting")
+
+	pane := paneCreated{index: "0", pid: 5000}
+	got := resolvePaneStateOrClear("sess", "1", pane)
+	if got != "bg_waiting" {
+		t.Errorf("got %q, want bg_waiting (job still alive)", got)
+	}
+	if _, err := os.Stat(filepath.Join(dir, "sess_1_0")); err != nil {
+		t.Error("state file should remain while background job is alive")
+	}
+}
+
+func TestResolvePaneStateOrClear_bgWaitingChildGone(t *testing.T) {
+	dir := t.TempDir()
+	setStateDirForTest(t, dir)
+	root := t.TempDir()
+	setProcRootForTest(t, root)
+
+	// pane shell → claude with no children (background job ended)
+	writeFakeProc(t, root, 5000, "bash", []int{5001})
+	writeFakeProc(t, root, 5001, "claude", nil)
+	writeStateToDir(t, dir, "sess_1_0", "bg_waiting")
+
+	pane := paneCreated{index: "0", pid: 5000}
+	got := resolvePaneStateOrClear("sess", "1", pane)
+	if got != "" {
+		t.Errorf("got %q, want '' (background job ended → idle)", got)
+	}
+	if _, err := os.Stat(filepath.Join(dir, "sess_1_0")); !os.IsNotExist(err) {
+		t.Error("state file should be removed once background job is gone")
+	}
+}
+
+func TestResolvePaneStateOrClear_doneStateUntouched(t *testing.T) {
+	dir := t.TempDir()
+	setStateDirForTest(t, dir)
+	root := t.TempDir()
+	setProcRootForTest(t, root)
+	// No claude child anywhere; pane is recorded as plain "done".
+	writeFakeProc(t, root, 5000, "bash", nil)
+	writeStateToDir(t, dir, "sess_1_0", "done")
+
+	pane := paneCreated{index: "0", pid: 5000}
+	got := resolvePaneStateOrClear("sess", "1", pane)
+	if got != "done" {
+		t.Errorf("got %q, want done (non-bg_waiting must not be cleared)", got)
+	}
+	if _, err := os.Stat(filepath.Join(dir, "sess_1_0")); err != nil {
+		t.Error("done state file should not be removed by resolvePaneStateOrClear")
+	}
+}
+
+// --- background-job detection ---
+
+func setProcRootForTest(t *testing.T, dir string) {
+	t.Helper()
+	orig := procRoot
+	procRoot = dir
+	t.Cleanup(func() { procRoot = orig })
+}
+
+// writeFakeProc lays out a minimal /proc tree for the given PID with the
+// given comm and children list. children may be nil for "no children".
+func writeFakeProc(t *testing.T, root string, pid int, comm string, children []int) {
+	t.Helper()
+	pidStr := strconv.Itoa(pid)
+	taskDir := filepath.Join(root, pidStr, "task", pidStr)
+	if err := os.MkdirAll(taskDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, pidStr, "comm"), []byte(comm+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	parts := make([]string, 0, len(children))
+	for _, c := range children {
+		parts = append(parts, strconv.Itoa(c))
+	}
+	body := strings.Join(parts, " ")
+	if body != "" {
+		body += "\n"
+	}
+	if err := os.WriteFile(filepath.Join(taskDir, "children"), []byte(body), 0o644); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestPaneHasBackgroundJobs_noChildren(t *testing.T) {
+	root := t.TempDir()
+	setProcRootForTest(t, root)
+	// Pane shell with no children at all.
+	writeFakeProc(t, root, 1000, "bash", nil)
+
+	if paneHasBackgroundJobs(1000) {
+		t.Error("expected false when pane shell has no children")
+	}
+}
+
+func TestPaneHasBackgroundJobs_claudeNoGrandchild(t *testing.T) {
+	root := t.TempDir()
+	setProcRootForTest(t, root)
+	// pane shell → claude → (no grandchildren)
+	writeFakeProc(t, root, 1000, "bash", []int{1001})
+	writeFakeProc(t, root, 1001, "claude", nil)
+
+	if paneHasBackgroundJobs(1000) {
+		t.Error("expected false when claude has no children of its own")
+	}
+}
+
+func TestPaneHasBackgroundJobs_claudeWithGrandchild(t *testing.T) {
+	root := t.TempDir()
+	setProcRootForTest(t, root)
+	// pane shell → claude → bash (background job)
+	writeFakeProc(t, root, 1000, "bash", []int{1001})
+	writeFakeProc(t, root, 1001, "claude", []int{1002})
+	writeFakeProc(t, root, 1002, "bash", nil)
+
+	if !paneHasBackgroundJobs(1000) {
+		t.Error("expected true when claude has a live grandchild")
+	}
+}
+
+func TestPaneHasBackgroundJobs_nonClaudeChildIgnored(t *testing.T) {
+	root := t.TempDir()
+	setProcRootForTest(t, root)
+	// pane shell → vim (and vim has children) — not a claude background job.
+	writeFakeProc(t, root, 1000, "bash", []int{1001})
+	writeFakeProc(t, root, 1001, "vim", []int{1002})
+	writeFakeProc(t, root, 1002, "less", nil)
+
+	if paneHasBackgroundJobs(1000) {
+		t.Error("expected false when the live grandchild is under a non-claude process")
+	}
+}
+
+func TestPaneHasBackgroundJobs_invalidPID(t *testing.T) {
+	root := t.TempDir()
+	setProcRootForTest(t, root)
+
+	if paneHasBackgroundJobs(0) {
+		t.Error("expected false for invalid pid")
+	}
+	if paneHasBackgroundJobs(99999) {
+		t.Error("expected false when /proc entry is missing")
 	}
 }
 

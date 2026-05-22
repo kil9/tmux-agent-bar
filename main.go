@@ -15,6 +15,9 @@ import (
 
 var stateDir = "/tmp/tmux-agent-bar"
 
+// procRoot is the root of the proc pseudo-filesystem. Overridable in tests.
+var procRoot = "/proc"
+
 // thinkingTTL is the maximum duration a "thinking" state is retained before it
 // is treated as stale. Handles Claude Code killed without firing the Stop hook.
 const thinkingTTL = 2 * time.Hour
@@ -45,7 +48,7 @@ func main() {
 	switch os.Args[1] {
 	case "hook":
 		if len(os.Args) < 3 {
-			fmt.Fprintln(os.Stderr, "usage: tmux-agent-bar hook <thinking|waiting|done|error|subagent_stop|planning>")
+			fmt.Fprintln(os.Stderr, "usage: tmux-agent-bar hook <thinking|waiting|done|error|subagent_stop|planning|bg_waiting>")
 			os.Exit(1)
 		}
 		runHook(os.Args[2])
@@ -73,10 +76,10 @@ func main() {
 // Called from Claude Code hooks.
 func runHook(status string) {
 	switch status {
-	case "thinking", "waiting", "done", "error", "subagent_stop", "planning":
+	case "thinking", "waiting", "done", "error", "subagent_stop", "planning", "bg_waiting":
 		// valid
 	default:
-		fmt.Fprintf(os.Stderr, "invalid status: %s (must be thinking|waiting|done|error|subagent_stop|planning)\n", status)
+		fmt.Fprintf(os.Stderr, "invalid status: %s (must be thinking|waiting|done|error|subagent_stop|planning|bg_waiting)\n", status)
 		os.Exit(1)
 	}
 
@@ -149,10 +152,19 @@ func runHook(status string) {
 
 	// When Stop fires after a plan was presented, show 💬 instead of ✅ so
 	// the user knows their approval is needed. Consume the marker here.
+	//
+	// Otherwise, when Claude leaves background work running (e.g. Bash
+	// run_in_background, Monitor), promote to bg_waiting (⏳) so the window
+	// label doesn't claim "done" while a worker process is still alive.
 	if status == "done" {
-		if planPendingExists(key) {
+		switch {
+		case planPendingExists(key):
 			os.Remove(filepath.Join(stateDir, key+".plan_pending"))
 			status = "waiting"
+		default:
+			if pid, err := tmuxPanePID(paneID); err == nil && paneHasBackgroundJobs(pid) {
+				status = "bg_waiting"
+			}
 		}
 	}
 
@@ -371,12 +383,13 @@ func stateKey(session, windowIndex, pane string) string {
 
 // emojiForStates returns the highest-priority emoji for the given slice of state strings.
 //
-// Priority: 🚨 (any error) > 💬 (any waiting) > ⏸ (any planning) > 🤖 (any thinking) > ✅ (any done) > "" (all idle)
+// Priority: 🚨 (any error) > 💬 (any waiting) > ⏸ (any planning) > 🤖 (any thinking) > ⏳ (any bg_waiting) > ✅ (any done) > "" (all idle)
 func emojiForStates(states []string) string {
 	anyError := false
 	anyWaiting := false
 	anyPlanning := false
 	anyThinking := false
+	anyBgWaiting := false
 	anyDone := false
 
 	for _, s := range states {
@@ -389,6 +402,8 @@ func emojiForStates(states []string) string {
 			anyPlanning = true
 		case "thinking":
 			anyThinking = true
+		case "bg_waiting":
+			anyBgWaiting = true
 		case "done":
 			anyDone = true
 		}
@@ -403,6 +418,8 @@ func emojiForStates(states []string) string {
 		return "⏸"
 	case anyThinking:
 		return "🤖"
+	case anyBgWaiting:
+		return "⏳"
 	case anyDone:
 		return "✅"
 	default:
@@ -464,10 +481,11 @@ func tmuxCurrentSession() (string, error) {
 	return strings.TrimSpace(string(out)), nil
 }
 
-// paneCreated pairs a pane index with its creation timestamp.
+// paneCreated pairs a pane index with its creation timestamp and shell PID.
 type paneCreated struct {
 	index   string
 	created time.Time
+	pid     int
 }
 
 // tmuxListPanes returns all pane indices for the given session and window.
@@ -506,11 +524,14 @@ func tmuxListPanesWithCreated(session, windowIndex string) ([]paneCreated, error
 				pc.created = time.Unix(ts, 0)
 			}
 		}
-		// pane_created unavailable (empty or zero): fall back to pane PID start time.
-		if pc.created.IsZero() && len(fields) == 3 {
+		if len(fields) >= 3 {
 			if pid, err := strconv.Atoi(strings.TrimSpace(fields[2])); err == nil && pid > 0 {
-				if t, ok := procStartTime(pid); ok {
-					pc.created = t
+				pc.pid = pid
+				// pane_created unavailable: fall back to pane PID start time.
+				if pc.created.IsZero() {
+					if t, ok := procStartTime(pid); ok {
+						pc.created = t
+					}
 				}
 			}
 		}
@@ -568,6 +589,83 @@ func procStartTime(pid int) (time.Time, bool) {
 	const userHz = 100
 	startSec := btime + startTicks/userHz
 	return time.Unix(startSec, 0), true
+}
+
+// paneHasBackgroundJobs reports whether the pane shell (panePID) appears to
+// have a Claude-spawned background process still alive.
+//
+// Heuristic: pane shell → claude (one or more direct children) → if any of
+// those claude processes has at least one child, treat the pane as having a
+// live background job. This catches the common Bash run_in_background /
+// Monitor case where claude forks a long-lived bash that outlives the
+// response (so Stop fires but the work is not actually done).
+//
+// We deliberately do NOT walk the full descendant tree or pattern-match
+// command lines — the 1st-level "claude has a child" signal is enough to
+// distinguish "truly done" from "still has a worker process".
+func paneHasBackgroundJobs(panePID int) bool {
+	for _, child := range readProcChildren(panePID) {
+		if !strings.Contains(readProcComm(child), "claude") {
+			continue
+		}
+		if len(readProcChildren(child)) > 0 {
+			return true
+		}
+	}
+	return false
+}
+
+// readProcChildren returns the direct child PIDs of pid by reading
+// /proc/<pid>/task/<pid>/children. Returns nil on any error or non-Linux
+// systems (where the file doesn't exist).
+func readProcChildren(pid int) []int {
+	if pid <= 0 {
+		return nil
+	}
+	pidStr := strconv.Itoa(pid)
+	path := filepath.Join(procRoot, pidStr, "task", pidStr, "children")
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil
+	}
+	fields := strings.Fields(string(data))
+	if len(fields) == 0 {
+		return nil
+	}
+	children := make([]int, 0, len(fields))
+	for _, f := range fields {
+		if cpid, err := strconv.Atoi(f); err == nil && cpid > 0 {
+			children = append(children, cpid)
+		}
+	}
+	return children
+}
+
+// readProcComm returns the command name (comm) for the given pid from
+// /proc/<pid>/comm. Returns "" on any error.
+func readProcComm(pid int) string {
+	if pid <= 0 {
+		return ""
+	}
+	data, err := os.ReadFile(filepath.Join(procRoot, strconv.Itoa(pid), "comm"))
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(string(data))
+}
+
+// tmuxPanePID returns the pane_pid (the shell process PID) for the given
+// pane ID. Used at Stop-hook time to inspect the descendant process tree.
+func tmuxPanePID(paneID string) (int, error) {
+	out, err := tmuxCommand("display-message", "-p", "-t", paneID, "#{pane_pid}")
+	if err != nil {
+		return 0, err
+	}
+	pid, err := strconv.Atoi(strings.TrimSpace(string(out)))
+	if err != nil {
+		return 0, err
+	}
+	return pid, nil
 }
 
 // tmuxLastActivePaneIndex returns the pane_index of the most recently activated
@@ -912,10 +1010,23 @@ func aggregateWindowEmoji(session, windowIndex string) string {
 
 	states := make([]string, 0, len(panes))
 	for _, pane := range panes {
-		key := stateKey(session, windowIndex, pane.index)
-		states = append(states, effectiveState(key, pane.created))
+		states = append(states, resolvePaneStateOrClear(session, windowIndex, pane))
 	}
 	return emojiForStates(states)
+}
+
+// resolvePaneStateOrClear returns the display state for a pane, with one side
+// effect: if the pane is recorded as bg_waiting but its shell no longer has a
+// Claude-spawned background process, the state file is removed so the pane
+// transitions back to idle on the next tick.
+func resolvePaneStateOrClear(session, windowIndex string, pane paneCreated) string {
+	key := stateKey(session, windowIndex, pane.index)
+	state := effectiveState(key, pane.created)
+	if state == "bg_waiting" && pane.pid > 0 && !paneHasBackgroundJobs(pane.pid) {
+		os.Remove(filepath.Join(stateDir, key))
+		return ""
+	}
+	return state
 }
 
 // --- Meta (model + context usage) ---
