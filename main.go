@@ -206,6 +206,22 @@ func cleanStaleFiles(dir, session, windowIndex string, alivePanes []string) {
 	}
 }
 
+// formatElapsed renders a thinking elapsed time for the status bar at
+// minute-or-coarser granularity. Seconds are dropped entirely and minutes are
+// floored, so anything under one minute returns "" (nothing is shown).
+//   - <60s        -> "" (hidden)
+//   - <3600s      -> "5m"
+//   - >=3600s     -> "1h5m" (the "0m" is kept, e.g. "1h0m")
+func formatElapsed(seconds int) string {
+	if seconds < 60 {
+		return ""
+	}
+	if seconds >= 3600 {
+		return fmt.Sprintf("%dh%dm", seconds/3600, (seconds%3600)/60)
+	}
+	return fmt.Sprintf("%dm", seconds/60)
+}
+
 // runStatus prints the emoji for the given window index.
 // Called from tmux window-status-format every status-interval.
 func runStatus(windowIndex string) {
@@ -229,16 +245,9 @@ func runStatus(windowIndex string) {
 	// For thinking state, append elapsed time in dimmed color.
 	if emoji == "🤖" {
 		if start, ok := thinkingStartTime(session, windowIndex); ok {
-			elapsed := int(time.Since(start).Seconds())
-			var timeStr string
-			if elapsed >= 3600 {
-				timeStr = fmt.Sprintf("%dh%dm%ds", elapsed/3600, (elapsed%3600)/60, elapsed%60)
-			} else if elapsed >= 60 {
-				timeStr = fmt.Sprintf("%dm%ds", elapsed/60, elapsed%60)
-			} else {
-				timeStr = fmt.Sprintf("%ds", elapsed)
+			if timeStr := formatElapsed(int(time.Since(start).Seconds())); timeStr != "" {
+				emoji += fmt.Sprintf("#[fg=colour8](%s)#[fg=default]", timeStr)
 			}
-			emoji += fmt.Sprintf("#[fg=colour8](%s)#[fg=default]", timeStr)
 		}
 	}
 
