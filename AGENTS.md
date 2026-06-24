@@ -144,7 +144,7 @@ go test ./...                       # 테스트
 ./tmux-agent-bar hook waiting       # 현재 pane 상태를 waiting으로 기록
 ./tmux-agent-bar hook done          # 현재 pane 상태를 done으로 기록
 ./tmux-agent-bar status <window>    # 윈도우 이모지 반환
-./tmux-agent-bar install            # ~/.tmux.conf + ~/.claude/settings.json 훅 등록
+./tmux-agent-bar install            # ~/.tmux.conf(느슨한 status-interval + 벨) + ~/.claude/settings.json 훅/preferredNotifChannel 등록
 ```
 
 ### 환경변수 및 런타임 플래그

@@ -880,7 +880,14 @@ func installTmuxConf() error {
 
 	addition := `
 # tmux-agent-bar
-set -g status-interval 1
+# window format 의 #(tmux-agent-bar) 는 interval 마다 창 개수만큼 프로세스를 spawn 한다.
+# 완료/주의 알림은 Claude Code 네이티브 벨(settings.json preferredNotifChannel:
+# terminal_bell)이 즉시 담당하므로, 이모지 갱신은 굳이 촘촘히 폴링하지 않는다.
+# interval 은 시계(%R) 가 멈추지 않을 만큼만 느슨하게 두고 idle 폴링 비용을 줄인다.
+set -g status-interval 30
+# 백그라운드 창에서 벨이 울리면 해당 창 이름을 강조해 시각 신호로도 쓴다.
+set -g monitor-bell on
+set -g window-status-bell-style "bg=colour3"
 set -g window-status-format "#(tmux-agent-bar status #{window_index})#I #W"
 set -g window-status-current-format "#(tmux-agent-bar status #{window_index})#I #W"
 # left: current directory basename; right: claude context+model + date
@@ -981,7 +988,17 @@ func installClaudeSettings() error {
 		}
 	}
 
-	if added == 0 {
+	// Route the immediate "done / needs-attention" signal to the terminal bell.
+	// The status-bar emojis are an ambient indicator polled on a loose
+	// status-interval, so the native bell (and tmux's monitor-bell highlight)
+	// carries the instant notification instead.
+	changed := false
+	if cfg["preferredNotifChannel"] != "terminal_bell" {
+		cfg["preferredNotifChannel"] = "terminal_bell"
+		changed = true
+	}
+
+	if added == 0 && !changed {
 		fmt.Println("~/.claude/settings.json: already configured, skipping")
 		return nil
 	}

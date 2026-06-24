@@ -44,7 +44,11 @@ make build
 > [Nerd Fonts](https://www.nerdfonts.com/) 설치 후 실제 문자(예: `/`)로 교체하세요.
 
 ```
-set -g status-interval 1
+# 이모지 갱신은 느슨하게 폴링하고(완료/주의 알림은 아래 네이티브 벨이 즉시 담당),
+# 백그라운드 창에서 벨이 울리면 창 이름을 강조해 시각 신호로도 쓴다.
+set -g status-interval 30
+set -g monitor-bell on
+set -g window-status-bell-style "bg=colour3"
 set -g window-status-format "#(tmux-agent-bar status #{window_index})#I #W"
 set -g window-status-current-format "#(tmux-agent-bar status #{window_index})#I #W"
 
@@ -64,6 +68,7 @@ set -g status-right-length 60
 
 ```json
 {
+  "preferredNotifChannel": "terminal_bell",
   "hooks": {
     "PreToolUse": [
       {
