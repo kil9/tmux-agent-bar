@@ -745,3 +745,28 @@ func writeAgedNotifyPending(t *testing.T, dir, key string) {
 		t.Fatal(err)
 	}
 }
+
+func TestFormatElapsed(t *testing.T) {
+	cases := []struct {
+		seconds int
+		want    string
+	}{
+		{0, ""},        // under a minute: hidden
+		{30, ""},       // under a minute: hidden
+		{59, ""},       // boundary just under a minute
+		{60, "1m"},     // exactly one minute
+		{90, "1m"},     // floored, not rounded
+		{119, "1m"},    // floored just under two minutes
+		{120, "2m"},    // exactly two minutes
+		{3599, "59m"},  // just under an hour, still minutes-only
+		{3600, "1h0m"}, // exactly an hour keeps the 0m
+		{3660, "1h1m"}, // an hour and a minute
+		{3661, "1h1m"}, // seconds dropped
+		{7325, "2h2m"}, // multi-hour, floored minutes
+	}
+	for _, c := range cases {
+		if got := formatElapsed(c.seconds); got != c.want {
+			t.Errorf("formatElapsed(%d) = %q, want %q", c.seconds, got, c.want)
+		}
+	}
+}
