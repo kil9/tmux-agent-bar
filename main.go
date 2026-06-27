@@ -721,24 +721,40 @@ func procStartTime(pid int) (time.Time, bool) {
 // have a Claude-spawned background process still alive.
 //
 // Heuristic: pane shell → claude (one or more direct children) → if any of
-// those claude processes has at least one child, treat the pane as having a
-// live background job. This catches the common Bash run_in_background /
-// Monitor case where claude forks a long-lived bash that outlives the
-// response (so Stop fires but the work is not actually done).
+// those claude processes has a child that is NOT a long-lived MCP server,
+// treat the pane as having a live background job. This catches the common
+// Bash run_in_background / Monitor case where claude forks a long-lived bash
+// that outlives the response (so Stop fires but the work is not actually done).
 //
-// We deliberately do NOT walk the full descendant tree or pattern-match
-// command lines — the 1st-level "claude has a child" signal is enough to
-// distinguish "truly done" from "still has a worker process".
+// MCP servers are excluded: claude spawns them once at startup and keeps them
+// alive for the whole session, so they are always present and would otherwise
+// pin every finished pane to ⏳ (bg_waiting). They are the only descendant we
+// pattern-match against; for everything else the "claude has a child" signal
+// is enough to distinguish "truly done" from "still has a worker process".
 func paneHasBackgroundJobs(panePID int) bool {
 	for _, child := range readProcChildren(panePID) {
 		if !strings.Contains(readProcComm(child), "claude") {
 			continue
 		}
-		if len(readProcChildren(child)) > 0 {
+		for _, gc := range readProcChildren(child) {
+			if looksLikeMCPServer(readProcCmdline(gc)) {
+				continue
+			}
 			return true
 		}
 	}
 	return false
+}
+
+// looksLikeMCPServer reports whether cmdline looks like a Model Context
+// Protocol server that Claude keeps alive for the whole session rather than a
+// background work process. Matched by the case-insensitive substring "mcp",
+// which appears in the path or package name of essentially every MCP server
+// invocation (e.g. .../.ccs/mcp/...-server.cjs, npx @modelcontextprotocol/
+// server-..., uvx mcp-server-...). Empty cmdline (proc gone / unreadable) is
+// treated as not-an-MCP-server so genuine background jobs still register.
+func looksLikeMCPServer(cmdline string) bool {
+	return strings.Contains(strings.ToLower(cmdline), "mcp")
 }
 
 // readProcChildren returns the direct child PIDs of pid by reading
@@ -778,6 +794,20 @@ func readProcComm(pid int) string {
 		return ""
 	}
 	return strings.TrimSpace(string(data))
+}
+
+// readProcCmdline returns the full command line for pid from
+// /proc/<pid>/cmdline, with the NUL argument separators replaced by spaces.
+// Returns "" on any error (including a process that has already exited).
+func readProcCmdline(pid int) string {
+	if pid <= 0 {
+		return ""
+	}
+	data, err := os.ReadFile(filepath.Join(procRoot, strconv.Itoa(pid), "cmdline"))
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(strings.ReplaceAll(string(data), "\x00", " "))
 }
 
 // tmuxPanePID returns the pane_pid (the shell process PID) for the given

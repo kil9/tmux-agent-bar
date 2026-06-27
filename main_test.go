@@ -690,6 +690,21 @@ func writeFakeProc(t *testing.T, root string, pid int, comm string, children []i
 	}
 }
 
+// writeFakeCmdline writes /proc/<pid>/cmdline (NUL-separated, as the kernel
+// presents it) so readProcCmdline can read it back. writeFakeProc must have
+// been called for pid first so the directory exists.
+func writeFakeCmdline(t *testing.T, root string, pid int, args ...string) {
+	t.Helper()
+	body := strings.Join(args, "\x00")
+	if body != "" {
+		body += "\x00"
+	}
+	path := filepath.Join(root, strconv.Itoa(pid), "cmdline")
+	if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestPaneHasBackgroundJobs_noChildren(t *testing.T) {
 	root := t.TempDir()
 	setProcRootForTest(t, root)
@@ -736,6 +751,38 @@ func TestPaneHasBackgroundJobs_nonClaudeChildIgnored(t *testing.T) {
 
 	if paneHasBackgroundJobs(1000) {
 		t.Error("expected false when the live grandchild is under a non-claude process")
+	}
+}
+
+func TestPaneHasBackgroundJobs_mcpServersIgnored(t *testing.T) {
+	root := t.TempDir()
+	setProcRootForTest(t, root)
+	// pane shell → claude → two node MCP servers (always alive for the session).
+	writeFakeProc(t, root, 1000, "bash", []int{1001})
+	writeFakeProc(t, root, 1001, "claude", []int{1002, 1003})
+	writeFakeProc(t, root, 1002, "node", nil)
+	writeFakeCmdline(t, root, 1002, "node", "/home/u/.ccs/mcp/ccs-websearch-server.cjs")
+	writeFakeProc(t, root, 1003, "node", nil)
+	writeFakeCmdline(t, root, 1003, "node", "/home/u/.ccs/mcp/ccs-image-analysis-server.cjs")
+
+	if paneHasBackgroundJobs(1000) {
+		t.Error("expected false when claude's only children are MCP servers")
+	}
+}
+
+func TestPaneHasBackgroundJobs_realJobAmongMCPServers(t *testing.T) {
+	root := t.TempDir()
+	setProcRootForTest(t, root)
+	// pane shell → claude → MCP server + a real background bash.
+	writeFakeProc(t, root, 1000, "bash", []int{1001})
+	writeFakeProc(t, root, 1001, "claude", []int{1002, 1003})
+	writeFakeProc(t, root, 1002, "node", nil)
+	writeFakeCmdline(t, root, 1002, "node", "/home/u/.ccs/mcp/ccs-websearch-server.cjs")
+	writeFakeProc(t, root, 1003, "bash", nil)
+	writeFakeCmdline(t, root, 1003, "bash", "-c", "sleep 600")
+
+	if !paneHasBackgroundJobs(1000) {
+		t.Error("expected true when a real background job sits alongside MCP servers")
 	}
 }
 
