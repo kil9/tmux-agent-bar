@@ -24,7 +24,7 @@ tmux 윈도우 이름 앞에 이모지를 붙여 Claude Code 에이전트 상태
 | 승인 대기        | `💬`      | 사용자 승인을 기다리는 중                            |
 | Plan 모드        | `⏸`      | Claude가 Plan 모드 실행 중                           |
 | 처리 중          | `🤖(12s)` | Claude가 thinking/작업 중 (경과 시간)                |
-| 백그라운드 대기  | `⏳`      | Claude가 background job(monitor/shell)을 두고 대기 중 |
+| 백그라운드 대기  | `⏳(5m)`  | Claude가 background job(monitor/shell)을 두고 대기 중 (경과 시간) |
 | 완료             | `✅`      | 작업 완료                                            |
 | 없음             | ` `       | idle (Claude 없음 또는 대기 없음)                    |
 
@@ -61,6 +61,11 @@ set -g status-left-length 40
 set -g status-right "#(tmux-agent-bar claude-right #{pane_id})#[fg=colour241,bg=colour234]<←>#[fg=colour148,bg=colour241]  %m/%d  %R "
 set -g status-right-length 60
 ```
+
+> **다음 세그먼트 색 지정**: `claude-right` 는 ctx+model 세그먼트 뒤의 powerline separator 가
+> 곧바로 이어지는 세그먼트 배경색(기본 `colour66`)으로 전환된다고 가정한다. ctx+model 뒤에 다른
+> 세그먼트(예: mode indicator)를 두는 커스텀 레이아웃이라면 그 세그먼트의 배경색을 2번째 인자로 넘긴다:
+> `#(tmux-agent-bar claude-right #{pane_id} colour241)`. tmux format(`#{?...}`)을 넘겨 동적 색도 가능하다.
 
 또는 `tmux-agent-bar install` 명령으로 위 설정을 `~/.tmux.conf`에 자동 추가하고 Claude Code hooks도 `~/.claude/settings.json`에 등록할 수 있다.
 
@@ -108,8 +113,9 @@ set -g status-right-length 60
 
 - tmux의 각 pane에서 실행 중인 Claude Code 프로세스 상태 감지
 - 상태 이모지를 윈도우 이름 앞에 자동 삽입 (🚨 / 💬 / ⏸ / 🤖 / ⏳ / ✅)
-- 🤖 상태에서 경과 시간(초) 표시 — 전체 요청 시작 기준으로 누적
+- 🤖 / ⏳ 상태에서 경과 시간 표시 (분 단위, 1분 미만은 숨김) — 각 상태 시작 기준으로 누적
 - ⏳ 상태: Stop hook 시점에 pane의 claude 프로세스 자식이 살아있으면 `done` 대신 `bg_waiting`으로 기록한다. 다음 status tick에서 자식이 사라지면 자동으로 idle로 돌아간다.
+- 상태 파일 GC: 닫힌 pane뿐 아니라 사라진 window/세션의 잔여 상태 파일도 status tick 중 주기적으로(최대 5분 간격) 정리한다.
 - `status-left`: 창번호, hostname, 현재 디렉토리를 각각 다른 배경색 powerline 세그먼트로 표시
 - `status-right`: Claude Code 활성 pane 포커스 시 컨텍스트 사용률(%) + 모델명 표시; 날짜·시간을 각각 다른 배경색 세그먼트로 구분
 - 기존 tmux 레이아웃·설정 변경 없이 동작 (별도 상태 바 불필요)

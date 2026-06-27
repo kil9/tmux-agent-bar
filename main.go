@@ -35,7 +35,13 @@ func main() {
 		case "status":
 			fmt.Print("⏳")
 		case "claude-right":
-			fmt.Printf("#[fg=colour66,bg=colour234]\ue0ba")
+			// Mirror the inactive output so a timeout still blends into the
+			// caller's next segment (next_bg arg, or the default).
+			nextBg := defaultNextBg
+			if len(os.Args) >= 4 && os.Args[3] != "" {
+				nextBg = os.Args[3]
+			}
+			fmt.Printf("#[fg=%s,bg=colour234]\ue0ba", nextBg)
 		}
 		os.Exit(124)
 	}()
@@ -60,10 +66,14 @@ func main() {
 		runStatus(os.Args[2])
 	case "claude-right":
 		if len(os.Args) < 3 {
-			fmt.Fprintln(os.Stderr, "usage: tmux-agent-bar claude-right <pane_id>")
+			fmt.Fprintln(os.Stderr, "usage: tmux-agent-bar claude-right <pane_id> [next_bg]")
 			os.Exit(1)
 		}
-		runClaudeRight(os.Args[2])
+		nextBg := ""
+		if len(os.Args) >= 4 {
+			nextBg = os.Args[3]
+		}
+		runClaudeRight(os.Args[2], nextBg)
 	case "install":
 		runInstall()
 	default:
@@ -218,6 +228,77 @@ func cleanStaleFiles(dir, session, windowIndex string, alivePanes []string) {
 	}
 }
 
+// orphanGCInterval bounds how often cleanOrphanState scans the state
+// directory, regardless of how many windows/ticks call it.
+const orphanGCInterval = 5 * time.Minute
+
+// cleanOrphanState removes state files whose (session, window) no longer exists.
+// cleanStaleFiles only reaps closed panes within a window that is still being
+// rendered; when a whole window or session is torn down, runStatus never
+// iterates it again, so its files would otherwise linger until /tmp is cleared.
+// Throttled via a marker file so the directory scan runs at most once per
+// orphanGCInterval.
+func cleanOrphanState() {
+	marker := filepath.Join(stateDir, ".gc")
+	if info, err := os.Stat(marker); err == nil && time.Since(info.ModTime()) < orphanGCInterval {
+		return
+	}
+
+	windowKeys, err := tmuxListWindowKeys()
+	if err != nil || len(windowKeys) == 0 {
+		// tmux unavailable or returned nothing — never risk deleting live state.
+		return
+	}
+
+	// Touch the marker before scanning so a slow/failing scan doesn't run every tick.
+	_ = os.WriteFile(marker, nil, 0o644)
+	removeOrphanFiles(stateDir, windowKeys)
+}
+
+// removeOrphanFiles deletes every entry in dir whose name does not belong to one
+// of the live windows. A file belongs to a window when its name starts with
+// "<session>_<window>_". Dotfiles (e.g. the .gc marker) are skipped. Pure
+// side-effect on the filesystem so it can be unit-tested without tmux.
+func removeOrphanFiles(dir string, liveWindowKeys []string) {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return
+	}
+	for _, e := range entries {
+		name := e.Name()
+		if strings.HasPrefix(name, ".") {
+			continue
+		}
+		live := false
+		for _, k := range liveWindowKeys {
+			if strings.HasPrefix(name, k+"_") {
+				live = true
+				break
+			}
+		}
+		if !live {
+			os.Remove(filepath.Join(dir, name))
+		}
+	}
+}
+
+// tmuxListWindowKeys returns "<session>_<window>" for every live window across
+// all sessions — the prefix (minus the trailing pane component) of the state
+// file keys produced by stateKey.
+func tmuxListWindowKeys() ([]string, error) {
+	out, err := tmuxCommand("list-windows", "-a", "-F", "#S_#I")
+	if err != nil {
+		return nil, err
+	}
+	var keys []string
+	for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
+		if k := strings.TrimSpace(line); k != "" {
+			keys = append(keys, k)
+		}
+	}
+	return keys, nil
+}
+
 // formatElapsed renders a thinking elapsed time for the status bar at
 // minute-or-coarser granularity. Seconds are dropped entirely and minutes are
 // floored, so anything under one minute returns "" (nothing is shown).
@@ -243,6 +324,10 @@ func runStatus(windowIndex string) {
 		return
 	}
 
+	// Opportunistically reap state files from windows/sessions that no longer
+	// exist. Throttled internally, so this is cheap to call on every status tick.
+	cleanOrphanState()
+
 	emoji := aggregateWindowEmoji(session, windowIndex)
 
 	// If the window shows ✅ and the user has activated (is currently viewing) it,
@@ -254,31 +339,56 @@ func runStatus(windowIndex string) {
 		}
 	}
 
-	// For thinking state, append elapsed time in dimmed color.
-	if emoji == "🤖" {
+	// For long-running states, append elapsed time in dimmed color.
+	switch emoji {
+	case "🤖":
 		if start, ok := thinkingStartTime(session, windowIndex); ok {
-			if timeStr := formatElapsed(int(time.Since(start).Seconds())); timeStr != "" {
-				emoji += fmt.Sprintf("#[fg=colour8](%s)#[fg=default]", timeStr)
-			}
+			emoji += elapsedSuffix(start)
+		}
+	case "⏳":
+		if start, ok := bgWaitingStartTime(session, windowIndex); ok {
+			emoji += elapsedSuffix(start)
 		}
 	}
 
 	fmt.Print(emoji)
 }
 
+// elapsedSuffix renders the dimmed "(elapsed)" suffix appended to the 🤖 and ⏳
+// emojis. Returns "" when the elapsed time is under the display threshold (see
+// formatElapsed), so nothing is shown for the first minute.
+func elapsedSuffix(start time.Time) string {
+	if timeStr := formatElapsed(int(time.Since(start).Seconds())); timeStr != "" {
+		return fmt.Sprintf("#[fg=colour8](%s)#[fg=default]", timeStr)
+	}
+	return ""
+}
+
+// defaultNextBg is the background color claude-right transitions into when no
+// explicit downstream background is given. Matches the date segment in the
+// README/install layout.
+const defaultNextBg = "colour66"
+
 // runClaudeRight outputs a tmux-format prefix for the status-right that includes:
 //   - when Claude Code is active: a ctx+model segment (bg=colour241) followed by
-//     the powerline separator transitioning into the date segment (bg=colour66)
-//   - when inactive: just the powerline separator into the date segment
+//     the powerline separator transitioning into the next segment (bg=nextBg)
+//   - when inactive: just the powerline separator into the next segment
 //
-// Called from tmux status-right via #(tmux-agent-bar claude-right #{pane_id}).
-// The caller's format string must continue with the date content on bg=colour66.
-func runClaudeRight(paneID string) {
+// nextBg is the background color of whatever segment follows in the caller's
+// status-right (empty \u2192 defaultNextBg). Custom layouts that place a different
+// segment after the ctx+model block (e.g. a mode indicator) pass its background
+// so the powerline separator blends correctly.
+//
+// Called from tmux status-right via #(tmux-agent-bar claude-right #{pane_id} [next_bg]).
+func runClaudeRight(paneID, nextBg string) {
 	const (
-		sep    = "\ue0ba"    // powerline left-pointing solid triangle (U+E0BA)
-		ctxBg  = "colour241" // context+model segment background
-		dateBg = "colour66"  // date segment background (steel teal)
+		sep   = "\ue0ba"    // powerline left-pointing solid triangle (U+E0BA)
+		ctxBg = "colour241" // context+model segment background
 	)
+	dateBg := nextBg
+	if dateBg == "" {
+		dateBg = defaultNextBg
+	}
 
 	key, err := tmuxPaneKey(paneID)
 	if err != nil {
@@ -317,28 +427,29 @@ type paneTime struct {
 	mtime time.Time
 }
 
-// selectThinkingTime picks the start time to display from a list of thinking
-// panes and the index of the most-recently-activated pane.
+// selectPaneStartTime picks the start time to display from a list of candidate
+// panes (those sharing the displayed state, e.g. thinking or bg_waiting) and the
+// index of the most-recently-activated pane.
 //
-//   - 0 panes thinking → false
-//   - 1 pane thinking → its mtime
-//   - multiple panes thinking + lastActive is one of them → that pane's mtime
-//   - multiple panes thinking + lastActive not among them → earliest mtime
-func selectThinkingTime(thinking []paneTime, lastActive string) (time.Time, bool) {
-	if len(thinking) == 0 {
+//   - 0 candidate panes → false
+//   - 1 candidate pane → its mtime
+//   - multiple candidates + lastActive is one of them → that pane's mtime
+//   - multiple candidates + lastActive not among them → earliest mtime
+func selectPaneStartTime(candidates []paneTime, lastActive string) (time.Time, bool) {
+	if len(candidates) == 0 {
 		return time.Time{}, false
 	}
-	if len(thinking) == 1 {
-		return thinking[0].mtime, true
+	if len(candidates) == 1 {
+		return candidates[0].mtime, true
 	}
-	for _, pt := range thinking {
+	for _, pt := range candidates {
 		if pt.index == lastActive {
 			return pt.mtime, true
 		}
 	}
 	// Fallback: earliest mtime.
-	earliest := thinking[0].mtime
-	for _, pt := range thinking[1:] {
+	earliest := candidates[0].mtime
+	for _, pt := range candidates[1:] {
 		if pt.mtime.Before(earliest) {
 			earliest = pt.mtime
 		}
@@ -382,7 +493,35 @@ func thinkingStartTime(session, windowIndex string) (time.Time, bool) {
 	}
 
 	lastActive, _ := tmuxLastActivePaneIndex(session, windowIndex)
-	return selectThinkingTime(thinking, lastActive)
+	return selectPaneStartTime(thinking, lastActive)
+}
+
+// bgWaitingStartTime returns the time from which the ⏳ (bg_waiting) elapsed
+// counter should run for the given window. The bg_waiting state file is written
+// once when Stop promotes a pane to bg_waiting and is not rewritten while the
+// state holds, so its mtime marks when background waiting began. When multiple
+// panes wait, selection mirrors thinkingStartTime (last-active, else earliest).
+func bgWaitingStartTime(session, windowIndex string) (time.Time, bool) {
+	panes, err := tmuxListPanes(session, windowIndex)
+	if err != nil {
+		return time.Time{}, false
+	}
+
+	var waiting []paneTime
+	for _, pane := range panes {
+		key := stateKey(session, windowIndex, pane)
+		if readState(key) != "bg_waiting" {
+			continue
+		}
+		info, err := os.Stat(filepath.Join(stateDir, key))
+		if err != nil {
+			continue
+		}
+		waiting = append(waiting, paneTime{index: pane, mtime: info.ModTime()})
+	}
+
+	lastActive, _ := tmuxLastActivePaneIndex(session, windowIndex)
+	return selectPaneStartTime(waiting, lastActive)
 }
 
 // stateKey returns the state file name for a given session, window, and pane.
