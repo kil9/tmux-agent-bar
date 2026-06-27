@@ -62,11 +62,6 @@ set -g status-right "#(tmux-agent-bar claude-right #{pane_id})#[fg=colour241,bg=
 set -g status-right-length 60
 ```
 
-> **다음 세그먼트 색 지정**: `claude-right` 는 ctx+model 세그먼트 뒤의 powerline separator 가
-> 곧바로 이어지는 세그먼트 배경색(기본 `colour66`)으로 전환된다고 가정한다. ctx+model 뒤에 다른
-> 세그먼트(예: mode indicator)를 두는 커스텀 레이아웃이라면 그 세그먼트의 배경색을 2번째 인자로 넘긴다:
-> `#(tmux-agent-bar claude-right #{pane_id} colour241)`. tmux format(`#{?...}`)을 넘겨 동적 색도 가능하다.
-
 또는 `tmux-agent-bar install` 명령으로 위 설정을 `~/.tmux.conf`에 자동 추가하고 Claude Code hooks도 `~/.claude/settings.json`에 등록할 수 있다.
 
 `~/.claude/settings.json`에 추가:

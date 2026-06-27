@@ -65,15 +65,6 @@
 - **대안**: (1) 세션 단위 GC → 닫힌 window 잔여물을 못 잡음. (2) 파일명 split 파싱 → 세션명에 `_` 가
   있으면 깨짐.
 
-### 디자인 결정: `claude-right` 다음 세그먼트 배경색을 인자로 노출
-- **날짜**: 2026-06-27
-- **결정**: `claude-right <pane_id> [next_bg]` 2번째 인자로 trailing separator 전환색을 받는다(기본
-  `colour66` 로 하위호환). mode indicator 등 ctx+model 뒤에 다른 세그먼트를 두는 커스텀 레이아웃에서
-  separator 가 자연스럽게 이어지게 한다.
-- **이유**: 기존엔 `colour66`(날짜 세그먼트) 전환이 하드코딩이라 커스텀 status-right 와 색이 어긋났다.
-  tmux format(`#{?...}`)을 인자로 넘기면 모드별 동적 색도 지원된다.
-- **대안**: separator 글리프까지 인자화 → 현 사용처가 모두 `` 라 불필요한 복잡도.
-
 ### 디자인 결정: `bg_waiting` 감지를 "pane shell → claude → 자식 존재" 1단계 휴리스틱으로 한정
 - **날짜**: 2026-05-22
 - **결정**: `paneHasBackgroundJobs` 는 pane shell PID 의 직접 자식 중 `comm` 에 "claude" 가 포함된 프로세스를 찾고, 해당 claude 의 자식이 1개 이상 있을 때만 true 를 반환한다. 후손 트리 전체 탐색이나 명령어 패턴 매칭은 하지 않는다.
@@ -90,4 +81,4 @@
 
 - 2026-05-22: 태스크 1(`bg_waiting` 상태 도입) 신규 등록.
 - 2026-05-22: 태스크 1 완료. 디자인 결정 2건 기록.
-- 2026-06-27: 태스크 2(orphan window/세션 GC), 태스크 3(`⏳` 경과 시간) 완료. `claude-right` next_bg 인자 추가. 디자인 결정 2건 기록.
+- 2026-06-27: 태스크 2(orphan window/세션 GC), 태스크 3(`⏳` 경과 시간) 완료. 디자인 결정 1건 기록.

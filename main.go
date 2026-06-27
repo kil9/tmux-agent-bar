@@ -35,13 +35,7 @@ func main() {
 		case "status":
 			fmt.Print("⏳")
 		case "claude-right":
-			// Mirror the inactive output so a timeout still blends into the
-			// caller's next segment (next_bg arg, or the default).
-			nextBg := defaultNextBg
-			if len(os.Args) >= 4 && os.Args[3] != "" {
-				nextBg = os.Args[3]
-			}
-			fmt.Printf("#[fg=%s,bg=colour234]\ue0ba", nextBg)
+			fmt.Printf("#[fg=colour66,bg=colour234]\ue0ba")
 		}
 		os.Exit(124)
 	}()
@@ -66,14 +60,10 @@ func main() {
 		runStatus(os.Args[2])
 	case "claude-right":
 		if len(os.Args) < 3 {
-			fmt.Fprintln(os.Stderr, "usage: tmux-agent-bar claude-right <pane_id> [next_bg]")
+			fmt.Fprintln(os.Stderr, "usage: tmux-agent-bar claude-right <pane_id>")
 			os.Exit(1)
 		}
-		nextBg := ""
-		if len(os.Args) >= 4 {
-			nextBg = os.Args[3]
-		}
-		runClaudeRight(os.Args[2], nextBg)
+		runClaudeRight(os.Args[2])
 	case "install":
 		runInstall()
 	default:
@@ -364,31 +354,19 @@ func elapsedSuffix(start time.Time) string {
 	return ""
 }
 
-// defaultNextBg is the background color claude-right transitions into when no
-// explicit downstream background is given. Matches the date segment in the
-// README/install layout.
-const defaultNextBg = "colour66"
-
 // runClaudeRight outputs a tmux-format prefix for the status-right that includes:
 //   - when Claude Code is active: a ctx+model segment (bg=colour241) followed by
-//     the powerline separator transitioning into the next segment (bg=nextBg)
-//   - when inactive: just the powerline separator into the next segment
+//     the powerline separator transitioning into the date segment (bg=colour66)
+//   - when inactive: just the powerline separator into the date segment
 //
-// nextBg is the background color of whatever segment follows in the caller's
-// status-right (empty \u2192 defaultNextBg). Custom layouts that place a different
-// segment after the ctx+model block (e.g. a mode indicator) pass its background
-// so the powerline separator blends correctly.
-//
-// Called from tmux status-right via #(tmux-agent-bar claude-right #{pane_id} [next_bg]).
-func runClaudeRight(paneID, nextBg string) {
+// Called from tmux status-right via #(tmux-agent-bar claude-right #{pane_id}).
+// The caller's format string must continue with the date content on bg=colour66.
+func runClaudeRight(paneID string) {
 	const (
-		sep   = "\ue0ba"    // powerline left-pointing solid triangle (U+E0BA)
-		ctxBg = "colour241" // context+model segment background
+		sep    = ""         // powerline left-pointing solid triangle (U+E0BA)
+		ctxBg  = "colour241" // context+model segment background
+		dateBg = "colour66"  // date segment background (steel teal)
 	)
-	dateBg := nextBg
-	if dateBg == "" {
-		dateBg = defaultNextBg
-	}
 
 	key, err := tmuxPaneKey(paneID)
 	if err != nil {
