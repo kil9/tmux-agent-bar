@@ -658,6 +658,30 @@ func TestResolvePaneStateOrClear_doneStateUntouched(t *testing.T) {
 
 // --- background-job detection ---
 
+func TestLooksLikeMCPServer(t *testing.T) {
+	cases := []struct {
+		name    string
+		cmdline string
+		want    bool
+	}{
+		{"ccs websearch server", "node /home/u/.ccs/mcp/ccs-websearch-server.cjs", true},
+		{"ccs image server", "node /home/u/.ccs/mcp/ccs-image-analysis-server.cjs", true},
+		{"npx modelcontextprotocol", "npx -y @modelcontextprotocol/server-filesystem /tmp", true},
+		{"uvx mcp server", "uvx mcp-server-git", true},
+		{"uppercase MCP", "node /opt/MCP/server.js", true},
+		{"plain background bash", "bash -c sleep 600", false},
+		{"dev server without mcp", "node /home/u/app/server.js", false},
+		{"empty (proc gone)", "", false},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if got := looksLikeMCPServer(c.cmdline); got != c.want {
+				t.Errorf("looksLikeMCPServer(%q) = %v, want %v", c.cmdline, got, c.want)
+			}
+		})
+	}
+}
+
 func setProcRootForTest(t *testing.T, dir string) {
 	t.Helper()
 	orig := procRoot

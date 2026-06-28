@@ -748,13 +748,15 @@ func paneHasBackgroundJobs(panePID int) bool {
 
 // looksLikeMCPServer reports whether cmdline looks like a Model Context
 // Protocol server that Claude keeps alive for the whole session rather than a
-// background work process. Matched by the case-insensitive substring "mcp",
-// which appears in the path or package name of essentially every MCP server
-// invocation (e.g. .../.ccs/mcp/...-server.cjs, npx @modelcontextprotocol/
-// server-..., uvx mcp-server-...). Empty cmdline (proc gone / unreadable) is
-// treated as not-an-MCP-server so genuine background jobs still register.
+// background work process. Matched case-insensitively by either "mcp"
+// (covers .../.ccs/mcp/...-server.cjs, uvx mcp-server-...) or the full
+// "modelcontextprotocol" — the canonical npx @modelcontextprotocol/server-...
+// form does NOT contain the substring "mcp", so it must be matched separately.
+// Empty cmdline (proc gone / unreadable) is treated as not-an-MCP-server so
+// genuine background jobs still register.
 func looksLikeMCPServer(cmdline string) bool {
-	return strings.Contains(strings.ToLower(cmdline), "mcp")
+	lc := strings.ToLower(cmdline)
+	return strings.Contains(lc, "mcp") || strings.Contains(lc, "modelcontextprotocol")
 }
 
 // readProcChildren returns the direct child PIDs of pid by reading

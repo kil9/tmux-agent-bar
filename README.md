@@ -109,7 +109,7 @@ set -g status-right-length 60
 - tmux의 각 pane에서 실행 중인 Claude Code 프로세스 상태 감지
 - 상태 이모지를 윈도우 이름 앞에 자동 삽입 (🚨 / 💬 / ⏸ / 🤖 / ⏳ / ✅)
 - 🤖 / ⏳ 상태에서 경과 시간 표시 (분 단위, 1분 미만은 숨김) — 각 상태 시작 기준으로 누적
-- ⏳ 상태: Stop hook 시점에 pane의 claude 프로세스 자식이 살아있으면 `done` 대신 `bg_waiting`으로 기록한다. 단 세션 내내 상주하는 MCP 서버(cmdline에 `mcp` 포함)는 백그라운드 작업이 아니므로 제외한다. 다음 status tick에서 자식이 사라지면 자동으로 idle로 돌아간다.
+- ⏳ 상태: Stop hook 시점에 pane의 claude 프로세스 자식이 살아있으면 `done` 대신 `bg_waiting`으로 기록한다. 단 세션 내내 상주하는 MCP 서버(cmdline에 `mcp` 또는 `modelcontextprotocol` 포함)는 백그라운드 작업이 아니므로 제외한다. 다음 status tick에서 자식이 사라지면 자동으로 idle로 돌아간다.
 - 상태 파일 GC: 닫힌 pane뿐 아니라 사라진 window/세션의 잔여 상태 파일도 status tick 중 주기적으로(최대 5분 간격) 정리한다.
 - `status-left`: 창번호, hostname, 현재 디렉토리를 각각 다른 배경색 powerline 세그먼트로 표시
 - `status-right`: Claude Code 활성 pane 포커스 시 컨텍스트 사용률(%) + 모델명 표시; 날짜·시간을 각각 다른 배경색 세그먼트로 구분
