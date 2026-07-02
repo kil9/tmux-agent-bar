@@ -117,10 +117,18 @@
 | `PreToolUse` | `thinking` | 🤖 표시, 경과 시간 카운트 시작 |
 | `PreToolUse` (`matcher: ExitPlanMode`) | `planning` | ⏸ 표시 (plan 제출 시점) |
 | `Notification` | `waiting` | 💬 표시 (1초 지연 후 확정) |
-| `Stop` | `done` → `bg_waiting` 분기 | claude 프로세스의 자식이 살아있으면 `bg_waiting` 으로 기록(⏳ 표시), 아니면 ✅ 표시 |
-| `SubagentStop` | `subagent_stop` | thinking 상태 연장용 타임스탬프 기록 |
+| `Stop` | `done` | plan 대기 중이면 `waiting`(💬)으로 승격, 아니면 ✅ 표시 |
+| `SubagentStop` | `subagent_stop` | 타임스탬프 기록 (현재 상태에 영향 없음) |
+| `SessionEnd` | `session_end` | 해당 pane의 상태·meta·마커 파일 즉시 정리 |
 
-`thinking` 상태는 TTL을 두어, Stop hook이 발사되지 않은 채 종료된 죽은 세션에서 🤖가 영구히 남는 것을 방지한다.
+⏳(백그라운드 대기) 판정은 hook 시점이 아니라 **status 렌더 시점**에 수행한다: 상태가
+`done`인 pane의 프로세스 트리(최대 4단계)에서 claude를 찾아 살아있는 **셸 자식**(bash/sh/zsh/dash —
+run_in_background·Monitor 워커가 뜨는 형태)이 있으면 ⏳로 표시한다. Stop hook 시점에는 hook
+프로세스 자신(및 병렬 실행되는 다른 Stop hook)이 claude의 자식이라 오탐을 피할 수 없기 때문이다.
+셸이 아닌 상주 자식(docker/python/node 등 MCP 서버, statusline 래퍼)은 세션 인프라라 잡으로
+치지 않으며, 자기 자신과 조상 프로세스도 카운트에서 제외한다.
+
+`thinking` 상태는 TTL을 두어, Stop hook이 발사되지 않은 채 종료된 죽은 세션에서 🤖가 영구히 남는 것을 방지한다. 추가로 `runStatus`가 7일 이상 방치된 상태 파일을 GC 한다.
 
 ### 프로젝트 구조
 
@@ -144,6 +152,7 @@ go test ./...                       # 테스트
 ./tmux-agent-bar hook waiting       # 현재 pane 상태를 waiting으로 기록
 ./tmux-agent-bar hook done          # 현재 pane 상태를 done으로 기록
 ./tmux-agent-bar status <window>    # 윈도우 이모지 반환
+./tmux-agent-bar hook session_end   # 현재 pane의 상태·meta 파일 즉시 정리 (SessionEnd hook용)
 ./tmux-agent-bar install            # ~/.tmux.conf(느슨한 status-interval + 벨) + ~/.claude/settings.json 훅/preferredNotifChannel 등록
 ```
 
@@ -151,6 +160,7 @@ go test ./...                       # 테스트
 
 - `TMUX_PANE`: tmux가 설정하는 현재 pane ID (예: `%3`). hook 실행 시 필수.
 - `TMUX`: tmux 소켓 경로. 존재하면 tmux 세션 내로 판단.
+- `TMUX_AGENT_BAR_CTX_LIMIT`: ctx% 계산 분모 토큰 수 (기본 200000). 1M 컨텍스트 세션용 오버라이드.
 - 상태 파일 디렉토리: `/tmp/tmux-agent-bar/` (하드코딩, 변경 불가)
 
 ### 보안 체크리스트

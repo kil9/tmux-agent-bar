@@ -4,9 +4,9 @@
 
 ## 현재 상태 (Snapshot)
 
-- 표시 상태: `🚨` (error) > `💬` (waiting) > `⏸` (planning) > `🤖` (thinking) > `✅` (done) > idle
-- Claude Code hook 4종(`PreToolUse`, `Notification`, `Stop`, `SubagentStop`)을 통해 상태 파일을 `/tmp/tmux-agent-bar/<key>` 에 기록한다.
-- 1초 주기 `runStatus` 가 각 윈도우의 pane 상태를 집계해 윈도우 이름 앞에 이모지를 삽입한다.
+- 표시 상태: `🚨` (error) > `💬` (waiting) > `⏸` (planning) > `🤖` (thinking) > `⏳` (bg_waiting) > `✅` (done) > idle
+- Claude Code hook 6종(`UserPromptSubmit`, `PreToolUse`, `Notification`, `Stop`, `SubagentStop`, `SessionEnd`)을 통해 상태 파일을 `/tmp/tmux-agent-bar/<key>` 에 기록한다.
+- `status-interval`(기본 30초) 주기의 `runStatus` 가 각 윈도우의 pane 상태를 집계해 윈도우 이름 앞에 이모지를 삽입한다. ⏳ 판정과 7일 GC 도 이 렌더 경로에서 수행한다.
 
 ## 다음 할 일
 
@@ -37,11 +37,17 @@
 
 ## 디자인 결정
 
-### 디자인 결정: `bg_waiting` 감지를 "pane shell → claude → 자식 존재" 1단계 휴리스틱으로 한정
+### 디자인 결정: `bg_waiting` 감지를 "pane shell → claude → 자식 존재" 1단계 휴리스틱으로 한정 (2026-07-02 폐기)
 - **날짜**: 2026-05-22
 - **결정**: `paneHasBackgroundJobs` 는 pane shell PID 의 직접 자식 중 `comm` 에 "claude" 가 포함된 프로세스를 찾고, 해당 claude 의 자식이 1개 이상 있을 때만 true 를 반환한다. 후손 트리 전체 탐색이나 명령어 패턴 매칭은 하지 않는다.
 - **이유**: 1차 구현 목표는 "Bash run_in_background / Monitor 가 살아있는 흔한 경우" 를 잡는 것이다. 직접 자식 두 단계만 보면 /proc 접근 비용이 매우 작고(`/proc/<pid>/task/<pid>/children` 두 번), 잘못 매칭될 가능성도 낮다.
 - **대안**: (1) 후손 트리 BFS 전수 조사 → 비용이 더 들고 오탐 증가. (2) `cmdline` 패턴 매칭 → 너무 fragile.
+
+### 디자인 결정: `bg_waiting` 판정을 Stop hook 시점에서 status 렌더 시점으로 이동
+- **날짜**: 2026-07-02
+- **결정**: Stop hook 은 `done` 만 기록하고, `runStatus` 렌더 경로에서 `done` 인 pane 에 살아있는 claude 백그라운드 잡이 있으면 ⏳ 로 표시한다(상태 파일은 `done` 유지 — 잡 종료 후 ✅ 복귀). claude 탐색은 직접 자식이 아니라 프로세스 트리 최대 4단계 BFS(`findClaudeDescendants`)로 하고, 잡 카운트는 **셸 comm(bash/sh/zsh/dash) 자식만** 대상으로 하며(도커/파이썬 MCP 서버 등 상주 인프라 자식 오탐 방지 — 실기기에서 claude 가 docker·python·statusline 래퍼를 상시 자식으로 가짐을 확인), 자기 자신·조상 PID 를 제외한다.
+- **이유**: (1) npm 설치 claude 는 `shell → node(shim) → claude` 체인이라 직접 자식 매칭이 항상 실패해 기존 감지가 완전히 죽어 있었다(실기기 확인). (2) Stop hook 시점에는 hook 프로세스 자신과 병렬 실행되는 다른 Stop hook 들이 claude 의 자식이라 "자식 존재" 신호가 오염된다. (3) tmux 는 `#()` 를 status-interval 마다만 재실행하므로 렌더 시점 판정으로 옮겨도 사용자에게 보이는 지연은 동일하다.
+- **대안**: (1) Stop hook 에서 자기 자신만 제외 → 병렬 sibling hook 오탐 잔존. (2) 자식 프로세스 나이 기반 필터 → "잡 시작 직후 Stop" 인 주 사용 사례를 놓침.
 
 ### 디자인 결정: 자동 idle 전환을 `runStatus` 렌더 경로에서 처리
 - **날짜**: 2026-05-22
@@ -53,3 +59,4 @@
 
 - 2026-05-22: 태스크 1(`bg_waiting` 상태 도입) 신규 등록.
 - 2026-05-22: 태스크 1 완료. 디자인 결정 2건 기록.
+- 2026-07-02: 점검에서 발견된 이슈 일괄 수정 — ⏳ 판정 렌더 시점 이동(npm shim 체인 대응 + 자기/조상 제외), `SessionEnd` hook 으로 pane 파일 즉시 정리, claude-right 에 stale meta 가드(살아있는 claude 없으면 미표시+정리), `TMUX_AGENT_BAR_CTX_LIMIT` 환경변수(1M 컨텍스트 대응), status 타임아웃 폴백 ⏳→⌛ 충돌 해소, install 템플릿 status-right 색 정합(colour66), 7일 GC, 상태 파일 원자적 쓰기, `shortModelName` fable/mythos 추가, 죽은 코드(`recentSubagentStop`) 제거.

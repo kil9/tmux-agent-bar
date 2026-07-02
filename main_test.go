@@ -542,10 +542,10 @@ func TestResolvePaneStateOrClear_bgWaitingChildAlive(t *testing.T) {
 	root := t.TempDir()
 	setProcRootForTest(t, root)
 
-	// pane shell → claude → child still alive
+	// pane shell → claude → shell worker still alive
 	writeFakeProc(t, root, 5000, "bash", []int{5001})
 	writeFakeProc(t, root, 5001, "claude", []int{5002})
-	writeFakeProc(t, root, 5002, "sleep", nil)
+	writeFakeProc(t, root, 5002, "bash", nil)
 	writeStateToDir(t, dir, "sess_1_0", "bg_waiting")
 
 	pane := paneCreated{index: "0", pid: 5000}
@@ -595,6 +595,32 @@ func TestResolvePaneStateOrClear_doneStateUntouched(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(dir, "sess_1_0")); err != nil {
 		t.Error("done state file should not be removed by resolvePaneStateOrClear")
+	}
+}
+
+// A recorded "done" with a live claude background job displays as bg_waiting
+// (⏳) at render time, without rewriting the state file — so ✅ reappears once
+// the job exits.
+func TestResolvePaneStateOrClear_doneWithLiveJobShowsBgWaiting(t *testing.T) {
+	dir := t.TempDir()
+	setStateDirForTest(t, dir)
+	root := t.TempDir()
+	setProcRootForTest(t, root)
+
+	// pane shell → node (npm launcher shim) → claude → bash (background job)
+	writeFakeProc(t, root, 5000, "zsh", []int{5001})
+	writeFakeProc(t, root, 5001, "node", []int{5002})
+	writeFakeProc(t, root, 5002, "claude", []int{5003})
+	writeFakeProc(t, root, 5003, "bash", nil)
+	writeStateToDir(t, dir, "sess_1_0", "done")
+
+	pane := paneCreated{index: "0", pid: 5000}
+	if got := resolvePaneStateOrClear("sess", "1", pane); got != "bg_waiting" {
+		t.Errorf("got %q, want bg_waiting (done + live job displays ⏳)", got)
+	}
+	data, err := os.ReadFile(filepath.Join(dir, "sess_1_0"))
+	if err != nil || string(data) != "done" {
+		t.Errorf("state file = %q (err=%v), want done (must not be rewritten)", string(data), err)
 	}
 }
 
@@ -690,6 +716,197 @@ func TestPaneHasBackgroundJobs_invalidPID(t *testing.T) {
 	}
 	if paneHasBackgroundJobs(99999) {
 		t.Error("expected false when /proc entry is missing")
+	}
+}
+
+// npm-installed claude runs as shell → node (launcher shim) → claude, so the
+// claude process is a grandchild of the pane shell, not a direct child.
+func TestPaneHasBackgroundJobs_npmShimChain(t *testing.T) {
+	root := t.TempDir()
+	setProcRootForTest(t, root)
+	// pane shell → node → claude → bash (background job)
+	writeFakeProc(t, root, 1000, "zsh", []int{1001})
+	writeFakeProc(t, root, 1001, "node", []int{1002})
+	writeFakeProc(t, root, 1002, "claude", []int{1003})
+	writeFakeProc(t, root, 1003, "bash", nil)
+
+	if !paneHasBackgroundJobs(1000) {
+		t.Error("expected true for shell → node shim → claude → job chain")
+	}
+}
+
+func TestPaneHasBackgroundJobs_npmShimChainNoJob(t *testing.T) {
+	root := t.TempDir()
+	setProcRootForTest(t, root)
+	// pane shell → node → claude with no children of its own
+	writeFakeProc(t, root, 1000, "zsh", []int{1001})
+	writeFakeProc(t, root, 1001, "node", []int{1002})
+	writeFakeProc(t, root, 1002, "claude", nil)
+
+	if paneHasBackgroundJobs(1000) {
+		t.Error("expected false when shim-launched claude has no children")
+	}
+}
+
+// The search stops at bgWalkDepth levels below the pane shell.
+func TestPaneHasBackgroundJobs_depthCapped(t *testing.T) {
+	root := t.TempDir()
+	setProcRootForTest(t, root)
+	// claude sits at level bgWalkDepth+1 — one level too deep to be found.
+	writeFakeProc(t, root, 1000, "zsh", []int{1001})
+	writeFakeProc(t, root, 1001, "wrap1", []int{1002})
+	writeFakeProc(t, root, 1002, "wrap2", []int{1003})
+	writeFakeProc(t, root, 1003, "wrap3", []int{1004})
+	writeFakeProc(t, root, 1004, "wrap4", []int{1005})
+	writeFakeProc(t, root, 1005, "claude", []int{1006})
+	writeFakeProc(t, root, 1006, "bash", nil)
+
+	if paneHasBackgroundJobs(1000) {
+		t.Error("expected false when claude is deeper than bgWalkDepth")
+	}
+}
+
+// Long-lived non-shell children of claude — MCP servers (docker/python/node),
+// statusline wrappers — are session infrastructure and must not count as
+// background jobs, or every session with an MCP server would show ⏳ forever.
+func TestPaneHasBackgroundJobs_mcpServersIgnored(t *testing.T) {
+	root := t.TempDir()
+	setProcRootForTest(t, root)
+	// claude with typical idle-session children: docker/python MCP servers
+	// and a statusline wrapper, but no shell worker.
+	writeFakeProc(t, root, 1000, "zsh", []int{1001})
+	writeFakeProc(t, root, 1001, "node", []int{1002})
+	writeFakeProc(t, root, 1002, "claude", []int{1003, 1004, 1005})
+	writeFakeProc(t, root, 1003, "docker", nil)
+	writeFakeProc(t, root, 1004, "python", nil)
+	writeFakeProc(t, root, 1005, "ccstatusline-wr", nil)
+
+	if paneHasBackgroundJobs(1000) {
+		t.Error("expected false when claude's children are only MCP servers / wrappers")
+	}
+
+	// Adding a shell worker alongside the MCP servers flips it to true.
+	writeFakeProc(t, root, 1002, "claude", []int{1003, 1004, 1005, 1006})
+	writeFakeProc(t, root, 1006, "bash", nil)
+	if !paneHasBackgroundJobs(1000) {
+		t.Error("expected true when a shell worker exists alongside MCP servers")
+	}
+}
+
+// When called from a Claude Code hook, the hook process itself is a child of
+// claude and must not count as a background job.
+func TestPaneHasBackgroundJobs_hookProcessExcluded(t *testing.T) {
+	root := t.TempDir()
+	setProcRootForTest(t, root)
+	self := os.Getpid()
+	// claude's only child is the currently running process (the hook itself,
+	// spawned as a bash -c wrapper — shell comm, so only the self-ancestor
+	// exclusion keeps it from counting).
+	writeFakeProc(t, root, 1000, "zsh", []int{1001})
+	writeFakeProc(t, root, 1001, "claude", []int{self})
+	writeFakeProc(t, root, self, "bash", nil)
+
+	if paneHasBackgroundJobs(1000) {
+		t.Error("expected false when claude's only child is the hook process itself")
+	}
+
+	// With an additional real job alongside the hook, it must report true.
+	writeFakeProc(t, root, 1001, "claude", []int{self, 1002})
+	writeFakeProc(t, root, 1002, "bash", nil)
+	if !paneHasBackgroundJobs(1000) {
+		t.Error("expected true when a real job exists besides the hook process")
+	}
+}
+
+func TestClearPaneFiles(t *testing.T) {
+	dir := t.TempDir()
+	setStateDirForTest(t, dir)
+
+	key := "sess_1_0"
+	writeStateToDir(t, dir, key, "thinking")
+	for _, suffix := range paneFileSuffixes {
+		if err := os.WriteFile(filepath.Join(dir, key+suffix), []byte("x"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// A neighboring pane's file must survive.
+	writeStateToDir(t, dir, "sess_1_1", "done")
+
+	clearPaneFiles(key)
+
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, e := range entries {
+		if e.Name() != "sess_1_1" {
+			t.Errorf("unexpected leftover file %s", e.Name())
+		}
+	}
+	if readState("sess_1_1") != "done" {
+		t.Error("neighboring pane state was removed")
+	}
+}
+
+func TestGcStaleFiles(t *testing.T) {
+	dir := t.TempDir()
+
+	oldPath := filepath.Join(dir, "dead_1_0.meta")
+	if err := os.WriteFile(oldPath, []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	old := time.Now().Add(-(stateFileTTL + time.Hour))
+	if err := os.Chtimes(oldPath, old, old); err != nil {
+		t.Fatal(err)
+	}
+
+	freshPath := filepath.Join(dir, "live_1_0")
+	if err := os.WriteFile(freshPath, []byte("done"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	gcStaleFiles(dir, stateFileTTL)
+
+	if _, err := os.Stat(oldPath); !os.IsNotExist(err) {
+		t.Error("stale file was not removed")
+	}
+	if _, err := os.Stat(freshPath); err != nil {
+		t.Error("fresh file was incorrectly removed")
+	}
+}
+
+func TestContextLimit(t *testing.T) {
+	t.Setenv("TMUX_AGENT_BAR_CTX_LIMIT", "")
+	if got := contextLimit(); got != defaultContextTokens {
+		t.Errorf("unset: got %d, want %d", got, defaultContextTokens)
+	}
+	t.Setenv("TMUX_AGENT_BAR_CTX_LIMIT", "1000000")
+	if got := contextLimit(); got != 1000000 {
+		t.Errorf("override: got %d, want 1000000", got)
+	}
+	t.Setenv("TMUX_AGENT_BAR_CTX_LIMIT", "banana")
+	if got := contextLimit(); got != defaultContextTokens {
+		t.Errorf("invalid: got %d, want %d", got, defaultContextTokens)
+	}
+	t.Setenv("TMUX_AGENT_BAR_CTX_LIMIT", "-5")
+	if got := contextLimit(); got != defaultContextTokens {
+		t.Errorf("negative: got %d, want %d", got, defaultContextTokens)
+	}
+}
+
+func TestShortModelName(t *testing.T) {
+	cases := map[string]string{
+		"claude-sonnet-4-6": "sonnet",
+		"claude-opus-4-8":   "opus",
+		"claude-haiku-4-5":  "haiku",
+		"claude-fable-5":    "fable",
+		"claude-mythos-5":   "mythos",
+		"claude-next-9":     "next-9", // unknown tier falls back to prefix strip
+	}
+	for model, want := range cases {
+		if got := shortModelName(model); got != want {
+			t.Errorf("shortModelName(%q) = %q, want %q", model, got, want)
+		}
 	}
 }
 

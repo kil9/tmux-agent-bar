@@ -20,10 +20,10 @@ tmux 윈도우 이름 앞에 이모지를 붙여 Claude Code 에이전트 상태
 
 | 상태             | 표시 예시 | 의미                                                 |
 | ---------------- | --------- | ---------------------------------------------------- |
-| 오류             | `🚨`      | 뭔가 문제가 생김 (최우선)                            |
+| 오류             | `🚨`      | 뭔가 문제가 생김 (최우선; 자동 트리거는 없고 `tmux-agent-bar hook error` 수동 호출용) |
 | 승인 대기        | `💬`      | 사용자 승인을 기다리는 중                            |
 | Plan 모드        | `⏸`      | Claude가 Plan 모드 실행 중                           |
-| 처리 중          | `🤖(12s)` | Claude가 thinking/작업 중 (경과 시간)                |
+| 처리 중          | `🤖(5m)`  | Claude가 thinking/작업 중 (경과 시간, 분 단위·1분 미만 숨김) |
 | 백그라운드 대기  | `⏳`      | Claude가 background job(monitor/shell)을 두고 대기 중 |
 | 완료             | `✅`      | 작업 완료                                            |
 | 없음             | ` `       | idle (Claude 없음 또는 대기 없음)                    |
@@ -40,7 +40,7 @@ make build
 
 `~/.tmux.conf`에 추가:
 
-> **참고**: 아래 설정의 `<→>`, `<←>` 위치에는 Powerline separator 문자가 들어갑니다.
+> **참고**: 아래 설정의 `<→>` 위치에는 Powerline separator 문자가 들어갑니다.
 > [Nerd Fonts](https://www.nerdfonts.com/) 설치 후 실제 문자(예: `/`)로 교체하세요.
 
 ```
@@ -56,9 +56,10 @@ set -g window-status-current-format "#(tmux-agent-bar status #{window_index})#I 
 set -g status-left "#[fg=colour16,bg=colour148,bold]  #I:#P #[fg=colour148,bg=colour241]<→>#[fg=colour231,bg=colour241] #{b:pane_current_path} #[fg=colour241,bg=colour234]<→>"
 set -g status-left-length 40
 
-# status-right: [ctx%+model|회색, Claude 활성 시] [날짜+시간|노랑-초록]
-# claude-right가 비활성 시에도 날짜 세그먼트 진입 화살표를 출력함
-set -g status-right "#(tmux-agent-bar claude-right #{pane_id})#[fg=colour241,bg=colour234]<←>#[fg=colour148,bg=colour241]  %m/%d  %R "
+# status-right: [ctx%+model|회색, Claude 활성 시] [날짜+시간|스틸 틸(colour66)]
+# claude-right가 ctx%+model 세그먼트와 날짜 세그먼트(bg=colour66) 진입 화살표까지 출력하므로,
+# 뒤에는 colour66 배경의 날짜 내용만 이어붙인다. (비활성 시에도 진입 화살표는 출력됨)
+set -g status-right "#(tmux-agent-bar claude-right #{pane_id})#[fg=colour231,bg=colour66]  %m/%d  %R "
 set -g status-right-length 60
 ```
 
@@ -70,11 +71,25 @@ set -g status-right-length 60
 {
   "preferredNotifChannel": "terminal_bell",
   "hooks": {
+    "UserPromptSubmit": [
+      {
+        "matcher": "",
+        "hooks": [
+          { "type": "command", "command": "tmux-agent-bar hook thinking" }
+        ]
+      }
+    ],
     "PreToolUse": [
       {
         "matcher": "",
         "hooks": [
           { "type": "command", "command": "tmux-agent-bar hook thinking" }
+        ]
+      },
+      {
+        "matcher": "ExitPlanMode",
+        "hooks": [
+          { "type": "command", "command": "tmux-agent-bar hook planning" }
         ]
       }
     ],
@@ -99,6 +114,14 @@ set -g status-right-length 60
           { "type": "command", "command": "tmux-agent-bar hook subagent_stop" }
         ]
       }
+    ],
+    "SessionEnd": [
+      {
+        "matcher": "",
+        "hooks": [
+          { "type": "command", "command": "tmux-agent-bar hook session_end" }
+        ]
+      }
     ]
   }
 }
@@ -108,12 +131,20 @@ set -g status-right-length 60
 
 - tmux의 각 pane에서 실행 중인 Claude Code 프로세스 상태 감지
 - 상태 이모지를 윈도우 이름 앞에 자동 삽입 (🚨 / 💬 / ⏸ / 🤖 / ⏳ / ✅)
-- 🤖 상태에서 경과 시간(초) 표시 — 전체 요청 시작 기준으로 누적
-- ⏳ 상태: Stop hook 시점에 pane의 claude 프로세스 자식이 살아있으면 `done` 대신 `bg_waiting`으로 기록한다. 다음 status tick에서 자식이 사라지면 자동으로 idle로 돌아간다.
+- 🤖 상태에서 경과 시간 표시(분 단위, 1분 미만 숨김) — 전체 요청 시작 기준으로 누적
+- ⏳ 상태: 상태가 `done`이어도 status tick 시점에 pane의 claude 프로세스에 살아있는 셸 자식(bash/sh 등 — run_in_background/Monitor 워커)이 있으면 ✅ 대신 ⏳로 표시한다. 잡이 끝나면 다음 tick부터 ✅로 돌아온다. claude가 npm shim(node) 아래에서 돌아도 프로세스 트리를 4단계까지 탐색해 감지하며, MCP 서버 같은 셸 아닌 상주 자식은 잡으로 치지 않는다.
+- `SessionEnd` hook으로 Claude 종료(또는 `/clear`) 즉시 해당 pane의 상태·meta 파일을 정리
 - `status-left`: 창번호, hostname, 현재 디렉토리를 각각 다른 배경색 powerline 세그먼트로 표시
-- `status-right`: Claude Code 활성 pane 포커스 시 컨텍스트 사용률(%) + 모델명 표시; 날짜·시간을 각각 다른 배경색 세그먼트로 구분
+- `status-right`: Claude Code 활성 pane 포커스 시 컨텍스트 사용률(%) + 모델명 표시; pane에 살아있는 claude가 없으면 표시하지 않고 stale meta를 정리
 - 기존 tmux 레이아웃·설정 변경 없이 동작 (별도 상태 바 불필요)
 - 완료(`✅`) 상태는 해당 윈도우를 활성화하면 자동으로 사라짐
+
+## 환경변수
+
+- `TMUX_AGENT_BAR_CTX_LIMIT`: 컨텍스트 사용률(%) 계산의 분모가 되는 토큰 수 (기본 200000).
+  1M 컨텍스트 세션을 주로 쓴다면 tmux 서버 환경에 지정한다. tmux를 띄우기 전 셸에서
+  `export TMUX_AGENT_BAR_CTX_LIMIT=1000000` 하거나, `~/.tmux.conf`에
+  `set-environment -g TMUX_AGENT_BAR_CTX_LIMIT 1000000`을 추가한다.
 
 ## 여러 pane 상태 집계 규칙
 

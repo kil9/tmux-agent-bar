@@ -33,7 +33,8 @@ func main() {
 		time.Sleep(900 * time.Millisecond)
 		switch subcmd {
 		case "status":
-			fmt.Print("⏳")
+			// ⌛ = "status lookup timed out". Distinct from bg_waiting's ⏳.
+			fmt.Print("⌛")
 		case "claude-right":
 			fmt.Printf("#[fg=colour66,bg=colour234]\ue0ba")
 		}
@@ -48,7 +49,7 @@ func main() {
 	switch os.Args[1] {
 	case "hook":
 		if len(os.Args) < 3 {
-			fmt.Fprintln(os.Stderr, "usage: tmux-agent-bar hook <thinking|waiting|done|error|subagent_stop|planning|bg_waiting>")
+			fmt.Fprintln(os.Stderr, "usage: tmux-agent-bar hook <thinking|waiting|done|error|subagent_stop|planning|bg_waiting|session_end>")
 			os.Exit(1)
 		}
 		runHook(os.Args[2])
@@ -76,10 +77,10 @@ func main() {
 // Called from Claude Code hooks.
 func runHook(status string) {
 	switch status {
-	case "thinking", "waiting", "done", "error", "subagent_stop", "planning", "bg_waiting":
+	case "thinking", "waiting", "done", "error", "subagent_stop", "planning", "bg_waiting", "session_end":
 		// valid
 	default:
-		fmt.Fprintf(os.Stderr, "invalid status: %s (must be thinking|waiting|done|error|subagent_stop|planning|bg_waiting)\n", status)
+		fmt.Fprintf(os.Stderr, "invalid status: %s (must be thinking|waiting|done|error|subagent_stop|planning|bg_waiting|session_end)\n", status)
 		os.Exit(1)
 	}
 
@@ -99,6 +100,14 @@ func runHook(status string) {
 		// tmux unavailable or pane lookup failed (e.g. TMUX_PANE set by a
 		// tmux-clone like psmux that doesn't support display-message).
 		// Treat the same as "not in tmux" and exit silently.
+		return
+	}
+
+	// SessionEnd: Claude Code exited (or /clear started a fresh session) — drop
+	// every file for this pane immediately so stale state/meta doesn't linger
+	// until the pane closes.
+	if status == "session_end" {
+		clearPaneFiles(key)
 		return
 	}
 
@@ -153,19 +162,14 @@ func runHook(status string) {
 	// When Stop fires after a plan was presented, show 💬 instead of ✅ so
 	// the user knows their approval is needed. Consume the marker here.
 	//
-	// Otherwise, when Claude leaves background work running (e.g. Bash
-	// run_in_background, Monitor), promote to bg_waiting (⏳) so the window
-	// label doesn't claim "done" while a worker process is still alive.
-	if status == "done" {
-		switch {
-		case planPendingExists(key):
-			os.Remove(filepath.Join(stateDir, key+".plan_pending"))
-			status = "waiting"
-		default:
-			if pid, err := tmuxPanePID(paneID); err == nil && paneHasBackgroundJobs(pid) {
-				status = "bg_waiting"
-			}
-		}
+	// Background-job detection (⏳) is deliberately NOT done here: at Stop
+	// time the hook process itself — and any sibling Stop hooks — are children
+	// of claude, so "claude has a live child" is ambiguous. runStatus resolves
+	// done→bg_waiting at render time instead; the visible latency is the same
+	// since tmux re-runs #() only every status-interval anyway.
+	if status == "done" && planPendingExists(key) {
+		os.Remove(filepath.Join(stateDir, key+".plan_pending"))
+		status = "waiting"
 	}
 
 	// Only rewrite the state file when the status actually changes.
@@ -192,6 +196,18 @@ func runHook(status string) {
 	}
 }
 
+// paneFileSuffixes lists every marker-file suffix stored alongside a pane's
+// state file in stateDir.
+var paneFileSuffixes = []string{".meta", ".thinking_start", ".subagent_stop", ".notify_pending", ".plan_pending"}
+
+// clearPaneFiles removes the state file and all marker files for the given key.
+func clearPaneFiles(key string) {
+	os.Remove(filepath.Join(stateDir, key))
+	for _, suffix := range paneFileSuffixes {
+		os.Remove(filepath.Join(stateDir, key+suffix))
+	}
+}
+
 // cleanStaleFiles removes state files for closed panes in the given session/window.
 // dir specifies the state directory (use stateDir in production, t.TempDir() in tests).
 func cleanStaleFiles(dir, session, windowIndex string, alivePanes []string) {
@@ -209,11 +225,33 @@ func cleanStaleFiles(dir, session, windowIndex string, alivePanes []string) {
 		name := e.Name()
 		// Match state files and all marker files (.meta, .thinking_start, .subagent_stop).
 		base := name
-		for _, suffix := range []string{".meta", ".thinking_start", ".subagent_stop", ".notify_pending", ".plan_pending"} {
+		for _, suffix := range paneFileSuffixes {
 			base = strings.TrimSuffix(base, suffix)
 		}
 		if strings.HasPrefix(base, prefix) && !alive[base] {
 			os.Remove(filepath.Join(dir, name))
+		}
+	}
+}
+
+// stateFileTTL is how long a state-dir file may go untouched before the
+// opportunistic GC in runStatus removes it. Cleans up leftovers from sessions
+// that died without firing hooks (kill -9, host reboot, dead tmux sessions).
+const stateFileTTL = 7 * 24 * time.Hour
+
+// gcStaleFiles removes files in dir whose mtime is older than ttl.
+func gcStaleFiles(dir string, ttl time.Duration) {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return
+	}
+	for _, e := range entries {
+		info, err := e.Info()
+		if err != nil {
+			continue
+		}
+		if time.Since(info.ModTime()) > ttl {
+			os.Remove(filepath.Join(dir, e.Name()))
 		}
 	}
 }
@@ -264,6 +302,9 @@ func runStatus(windowIndex string) {
 	}
 
 	fmt.Print(emoji)
+
+	// Opportunistic GC for files no hook will ever clean again.
+	gcStaleFiles(stateDir, stateFileTTL)
 }
 
 // runClaudeRight outputs a tmux-format prefix for the status-right that includes:
@@ -280,21 +321,29 @@ func runClaudeRight(paneID string) {
 		dateBg = "colour66"  // date segment background (steel teal)
 	)
 
+	// inactive: no ctx segment — just the transition into the date segment.
+	inactive := func() { fmt.Printf("#[fg=%s,bg=colour234]%s", dateBg, sep) }
+
 	key, err := tmuxPaneKey(paneID)
 	if err != nil {
-		// Fallback: just emit the transition into the date segment.
-		fmt.Printf("#[fg=%s,bg=colour234]%s", dateBg, sep)
+		inactive()
 		return
 	}
 	meta, ok := readMeta(key)
 	if !ok || meta.Model == "" {
-		// No Claude Code session active; transition directly into the date segment.
-		fmt.Printf("#[fg=%s,bg=colour234]%s", dateBg, sep)
+		inactive()
+		return
+	}
+	// The meta file can outlive the Claude Code session (SessionEnd doesn't
+	// fire on kill -9 etc.), so verify a claude process is actually alive in
+	// the pane before showing ctx%. Drop the stale meta when it isn't.
+	if pid, err := tmuxPanePID(paneID); err == nil && len(findClaudeDescendants(pid, bgWalkDepth)) == 0 {
+		os.Remove(filepath.Join(stateDir, key+".meta"))
+		inactive()
 		return
 	}
 
-	const maxContextTokens = 200000
-	pct := meta.InputTokens * 100 / maxContextTokens
+	pct := meta.InputTokens * 100 / contextLimit()
 	if pct > 100 {
 		pct = 100
 	}
@@ -436,7 +485,7 @@ func emojiForStates(states []string) string {
 	}
 }
 
-// tmuxCommand runs a tmux subcommand with a 500ms timeout.
+// tmuxCommand runs a tmux subcommand with a 200ms timeout.
 // If the tmux server is slow or unresponsive, the command is killed
 // rather than blocking the caller (and, transitively, tmux itself).
 func tmuxCommand(args ...string) ([]byte, error) {
@@ -600,28 +649,97 @@ func procStartTime(pid int) (time.Time, bool) {
 	return time.Unix(startSec, 0), true
 }
 
-// paneHasBackgroundJobs reports whether the pane shell (panePID) appears to
-// have a Claude-spawned background process still alive.
+// bgWalkDepth caps how deep the pane's process tree is searched for a claude
+// process. The chain is often deeper than "shell → claude": an npm-installed
+// claude runs as shell → node (launcher shim) → claude, and custom wrappers
+// can add another level.
+const bgWalkDepth = 4
+
+// bgJobComms are the process names counted as Claude-spawned background jobs.
+// Bash run_in_background / Monitor workers run as a persistent shell child of
+// claude. Other long-lived children — MCP servers (docker, python, node, npm),
+// statusline wrappers — are session infrastructure, not background work, and
+// must not keep the pane stuck on ⏳.
+var bgJobComms = map[string]bool{"bash": true, "sh": true, "zsh": true, "dash": true}
+
+// paneHasBackgroundJobs reports whether a claude process under the pane shell
+// (panePID) still has a live shell child — i.e. Claude left background work
+// running (Bash run_in_background, Monitor) after its response ended. This
+// catches the case where Stop fired but the work is not actually done.
 //
-// Heuristic: pane shell → claude (one or more direct children) → if any of
-// those claude processes has at least one child, treat the pane as having a
-// live background job. This catches the common Bash run_in_background /
-// Monitor case where claude forks a long-lived bash that outlives the
-// response (so Stop fires but the work is not actually done).
-//
-// We deliberately do NOT walk the full descendant tree or pattern-match
-// command lines — the 1st-level "claude has a child" signal is enough to
-// distinguish "truly done" from "still has a worker process".
+// The calling process and its ancestors are excluded from the child check:
+// when this runs from a Claude Code hook, the hook shell itself is a child
+// of claude and must not count as a background job.
 func paneHasBackgroundJobs(panePID int) bool {
-	for _, child := range readProcChildren(panePID) {
-		if !strings.Contains(readProcComm(child), "claude") {
-			continue
-		}
-		if len(readProcChildren(child)) > 0 {
-			return true
+	exclude := selfAncestors()
+	for _, claudePID := range findClaudeDescendants(panePID, bgWalkDepth) {
+		for _, child := range readProcChildren(claudePID) {
+			if bgJobComms[readProcComm(child)] && !exclude[child] {
+				return true
+			}
 		}
 	}
 	return false
+}
+
+// findClaudeDescendants returns the PIDs of processes whose comm contains
+// "claude" among the descendants of pid, searching at most maxDepth levels
+// down. Descendants of a found claude process are not searched further — its
+// children are its jobs, not more claude candidates.
+func findClaudeDescendants(pid, maxDepth int) []int {
+	var found []int
+	frontier := []int{pid}
+	for depth := 0; depth < maxDepth && len(frontier) > 0; depth++ {
+		var next []int
+		for _, p := range frontier {
+			for _, c := range readProcChildren(p) {
+				if strings.Contains(readProcComm(c), "claude") {
+					found = append(found, c)
+					continue
+				}
+				next = append(next, c)
+			}
+		}
+		frontier = next
+	}
+	return found
+}
+
+// selfAncestors returns the calling process's PID and its ancestors' PIDs.
+func selfAncestors() map[int]bool {
+	set := make(map[int]bool)
+	pid := os.Getpid()
+	for pid > 1 && !set[pid] {
+		set[pid] = true
+		pid = procPPID(pid)
+	}
+	return set
+}
+
+// procPPID returns the parent PID of pid from /proc/<pid>/stat, or 0 on error.
+func procPPID(pid int) int {
+	if pid <= 0 {
+		return 0
+	}
+	data, err := os.ReadFile(filepath.Join(procRoot, strconv.Itoa(pid), "stat"))
+	if err != nil {
+		return 0
+	}
+	// Skip past "pid (comm)" — comm may contain spaces and parentheses.
+	s := string(data)
+	rp := strings.LastIndex(s, ")")
+	if rp < 0 {
+		return 0
+	}
+	fields := strings.Fields(s[rp+1:]) // [state ppid pgrp ...]
+	if len(fields) < 2 {
+		return 0
+	}
+	ppid, err := strconv.Atoi(fields[1])
+	if err != nil {
+		return 0
+	}
+	return ppid
 }
 
 // readProcChildren returns the direct child PIDs of pid by reading
@@ -711,12 +829,31 @@ func tmuxLastActivePaneIndex(session, windowIndex string) (string, error) {
 	return latestPane, nil
 }
 
+// writeFileAtomic writes data to path via a temp file + rename so that a
+// concurrent reader (the status tick) never observes a partially written file.
+func writeFileAtomic(path string, data []byte) error {
+	tmp, err := os.CreateTemp(filepath.Dir(path), ".tmp-*")
+	if err != nil {
+		return err
+	}
+	_, werr := tmp.Write(data)
+	cerr := tmp.Close()
+	if werr != nil || cerr != nil {
+		os.Remove(tmp.Name())
+		if werr != nil {
+			return werr
+		}
+		return cerr
+	}
+	return os.Rename(tmp.Name(), path)
+}
+
 // writePlanPending records that a plan was presented and is awaiting user approval.
 func writePlanPending(key string) error {
 	if err := os.MkdirAll(stateDir, 0o755); err != nil {
 		return err
 	}
-	return os.WriteFile(filepath.Join(stateDir, key+".plan_pending"), nil, 0o644)
+	return writeFileAtomic(filepath.Join(stateDir, key+".plan_pending"), nil)
 }
 
 // planPendingExists reports whether a plan-pending marker exists for the given key.
@@ -733,7 +870,7 @@ func writeThinkingStart(key string) error {
 		return err
 	}
 	path := filepath.Join(stateDir, key+".thinking_start")
-	return os.WriteFile(path, []byte(time.Now().Format(time.RFC3339Nano)), 0o644)
+	return writeFileAtomic(path, []byte(time.Now().Format(time.RFC3339Nano)))
 }
 
 // readThinkingStart returns the recorded thinking start time for the given key.
@@ -761,7 +898,7 @@ func writeNotifyPending(key string) error {
 		return err
 	}
 	path := filepath.Join(stateDir, key+".notify_pending")
-	return os.WriteFile(path, []byte(time.Now().Format(time.RFC3339Nano)), 0o644)
+	return writeFileAtomic(path, []byte(time.Now().Format(time.RFC3339Nano)))
 }
 
 // effectiveState returns the display state for the given pane.
@@ -785,27 +922,14 @@ func effectiveState(key string, created time.Time) string {
 }
 
 // markSubagentStop writes the current time to the subagent-stop marker file.
-// The marker allows the subsequent Notification hook to distinguish a
-// SubagentStop-triggered notification (main agent still thinking) from an
-// interrupt-triggered notification (agent stopped, should show waiting).
+// Informational only — no state depends on it since deferred notify replaced
+// the old suppression logic; it is cleaned up with the other pane files.
 func markSubagentStop(key string) error {
 	if err := os.MkdirAll(stateDir, 0o755); err != nil {
 		return err
 	}
 	path := filepath.Join(stateDir, key+".subagent_stop")
-	return os.WriteFile(path, []byte(time.Now().Format(time.RFC3339Nano)), 0o644)
-}
-
-// recentSubagentStop reports whether a SubagentStop event occurred for the given
-// key within the last 3 seconds. SubagentStop and its following Notification fire
-// nearly simultaneously, so 3 s is a safe window while avoiding false positives
-// for interrupt notifications that arrive later.
-func recentSubagentStop(key string) bool {
-	info, err := os.Stat(filepath.Join(stateDir, key+".subagent_stop"))
-	if err != nil {
-		return false
-	}
-	return time.Since(info.ModTime()) < 3*time.Second
+	return writeFileAtomic(path, []byte(time.Now().Format(time.RFC3339Nano)))
 }
 
 // writeState writes the status string to the state file for the given key.
@@ -814,7 +938,7 @@ func writeState(key, status string) error {
 		return err
 	}
 	path := filepath.Join(stateDir, key)
-	return os.WriteFile(path, []byte(status), 0o644)
+	return writeFileAtomic(path, []byte(status))
 }
 
 // readState reads the status for the given key. Returns "" if the file doesn't exist.
@@ -899,10 +1023,12 @@ set -g monitor-bell on
 set -g window-status-bell-style "bg=colour3"
 set -g window-status-format "#(tmux-agent-bar status #{window_index})#I #W"
 set -g window-status-current-format "#(tmux-agent-bar status #{window_index})#I #W"
-# left: current directory basename; right: claude context+model + date
+# left: current directory basename
 set -g status-left "#[fg=colour16,bg=colour148,bold]  #I:#P #[fg=colour148,bg=colour241]` + "\ue0bc" + `#[fg=colour231,bg=colour241] #{b:pane_current_path} #[fg=colour241,bg=colour234]` + "\ue0bc" + `"
 set -g status-left-length 40
-set -g status-right "#(tmux-agent-bar claude-right #{pane_id})#[fg=colour241,bg=colour234]` + "\ue0ba" + `#[fg=colour148,bg=colour241]  %m/%d  %R "
+# right: claude-right \uac00 ctx%+model \uc138\uadf8\uba3c\ud2b8\uc640 \ub0a0\uc9dc \uc138\uadf8\uba3c\ud2b8(bg=colour66) \uc9c4\uc785 \ud654\uc0b4\ud45c\uae4c\uc9c0 \ucd9c\ub825\ud558\ubbc0\ub85c
+# \ub4a4\uc5d0\ub294 colour66 \ubc30\uacbd\uc758 \ub0a0\uc9dc \ub0b4\uc6a9\ub9cc \uc774\uc5b4\ubd99\uc778\ub2e4.
+set -g status-right "#(tmux-agent-bar claude-right #{pane_id})#[fg=colour231,bg=colour66]  %m/%d  %R "
 set -g status-right-length 60
 `
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
@@ -949,6 +1075,8 @@ func installClaudeSettings() error {
 	}
 
 	// eventHasCmd reports whether the given event already contains the command.
+	// Substring match, so an absolute-path registration
+	// (e.g. "/home/u/.local/bin/tmux-agent-bar hook done") counts as present.
 	eventHasCmd := func(event, cmd string) bool {
 		entries, _ := hooks[event].([]any)
 		for _, e := range entries {
@@ -956,7 +1084,7 @@ func installClaudeSettings() error {
 			cmds, _ := entry["hooks"].([]any)
 			for _, c := range cmds {
 				h, _ := c.(map[string]any)
-				if h["command"] == cmd {
+				if s, ok := h["command"].(string); ok && strings.Contains(s, cmd) {
 					return true
 				}
 			}
@@ -987,6 +1115,9 @@ func installClaudeSettings() error {
 		{"Notification", "", "tmux-agent-bar hook waiting"},
 		{"SubagentStop", "", "tmux-agent-bar hook subagent_stop"},
 		{"UserPromptSubmit", "", "tmux-agent-bar hook thinking"},
+		// Clean up this pane's state/meta files the moment the session ends,
+		// so an exited claude doesn't keep showing stale ctx%/state.
+		{"SessionEnd", "", "tmux-agent-bar hook session_end"},
 	}
 
 	added := 0
@@ -1041,16 +1172,27 @@ func aggregateWindowEmoji(session, windowIndex string) string {
 	return emojiForStates(states)
 }
 
-// resolvePaneStateOrClear returns the display state for a pane, with one side
-// effect: if the pane is recorded as bg_waiting but its shell no longer has a
-// Claude-spawned background process, the state file is removed so the pane
-// transitions back to idle on the next tick.
+// resolvePaneStateOrClear returns the display state for a pane, applying
+// render-time background-job resolution:
+//
+//   - "done" with a live claude background job displays as bg_waiting (⏳)
+//     without rewriting the state file; once the job exits, the recorded
+//     "done" shows ✅ again.
+//   - a recorded "bg_waiting" (manual/legacy) whose job is gone is cleared
+//     to idle, removing the state file.
 func resolvePaneStateOrClear(session, windowIndex string, pane paneCreated) string {
 	key := stateKey(session, windowIndex, pane.index)
 	state := effectiveState(key, pane.created)
-	if state == "bg_waiting" && pane.pid > 0 && !paneHasBackgroundJobs(pane.pid) {
-		os.Remove(filepath.Join(stateDir, key))
-		return ""
+	switch state {
+	case "done":
+		if pane.pid > 0 && paneHasBackgroundJobs(pane.pid) {
+			return "bg_waiting"
+		}
+	case "bg_waiting":
+		if pane.pid > 0 && !paneHasBackgroundJobs(pane.pid) {
+			os.Remove(filepath.Join(stateDir, key))
+			return ""
+		}
 	}
 	return state
 }
@@ -1225,7 +1367,7 @@ func writeMeta(key string, m PaneMeta) error {
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(filepath.Join(stateDir, key+".meta"), data, 0o644)
+	return writeFileAtomic(filepath.Join(stateDir, key+".meta"), data)
 }
 
 // readMeta reads PaneMeta from the meta file for the given key.
@@ -1241,10 +1383,26 @@ func readMeta(key string) (PaneMeta, bool) {
 	return m, true
 }
 
+// defaultContextTokens is the assumed context-window size when
+// TMUX_AGENT_BAR_CTX_LIMIT is not set.
+const defaultContextTokens = 200000
+
+// contextLimit returns the denominator for the ctx% display. Sessions with a
+// larger context window (e.g. 1M) can override it by exporting
+// TMUX_AGENT_BAR_CTX_LIMIT=<tokens> into the tmux server's environment.
+func contextLimit() int {
+	if v := os.Getenv("TMUX_AGENT_BAR_CTX_LIMIT"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			return n
+		}
+	}
+	return defaultContextTokens
+}
+
 // shortModelName returns a short display name for a Claude model ID.
 // e.g. "claude-sonnet-4-6" → "sonnet", "claude-opus-4-6" → "opus"
 func shortModelName(model string) string {
-	for _, tier := range []string{"opus", "sonnet", "haiku"} {
+	for _, tier := range []string{"opus", "sonnet", "haiku", "fable", "mythos"} {
 		if strings.Contains(model, tier) {
 			return tier
 		}
