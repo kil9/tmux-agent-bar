@@ -241,6 +241,11 @@ func cleanStaleFiles(dir, session, windowIndex string, alivePanes []string) {
 // directory, regardless of how many windows/ticks call it.
 const orphanGCInterval = 5 * time.Minute
 
+// orphanTmpMaxAge is how long a leftover ".tmp-*" file (from a crashed
+// writeFileAtomic) is kept before removeOrphanFiles reaps it. Files younger
+// than this may belong to an in-flight atomic write, so they are left alone.
+const orphanTmpMaxAge = time.Hour
+
 // cleanOrphanState removes state files whose (session, window) no longer exists.
 // cleanStaleFiles only reaps closed panes within a window that is still being
 // rendered; when a whole window or session is torn down, runStatus never
@@ -266,8 +271,10 @@ func cleanOrphanState() {
 
 // removeOrphanFiles deletes every entry in dir whose name does not belong to one
 // of the live windows. A file belongs to a window when its name starts with
-// "<session>_<window>_". Dotfiles (e.g. the .gc marker) are skipped. Pure
-// side-effect on the filesystem so it can be unit-tested without tmux.
+// "<session>_<window>_". Dotfiles (e.g. the .gc marker) are skipped, except a
+// ".tmp-*" leftover from a crashed writeFileAtomic, which is reaped once older
+// than orphanTmpMaxAge. Pure side-effect on the filesystem so it can be
+// unit-tested without tmux.
 func removeOrphanFiles(dir string, liveWindowKeys []string) {
 	entries, err := os.ReadDir(dir)
 	if err != nil {
@@ -276,6 +283,14 @@ func removeOrphanFiles(dir string, liveWindowKeys []string) {
 	for _, e := range entries {
 		name := e.Name()
 		if strings.HasPrefix(name, ".") {
+			// A ".tmp-*" file is a leftover from a crashed writeFileAtomic. Reap
+			// it once it's old enough that no in-flight atomic write could still
+			// own it; younger ones may be a rename in progress, so leave them.
+			if strings.HasPrefix(name, ".tmp-") {
+				if info, err := e.Info(); err == nil && time.Since(info.ModTime()) >= orphanTmpMaxAge {
+					os.Remove(filepath.Join(dir, name))
+				}
+			}
 			continue
 		}
 		live := false
@@ -734,9 +749,9 @@ func tmuxListPanesWithCreated(session, windowIndex string) ([]paneCreated, error
 }
 
 // procStartTime returns the start time of the process with the given PID by
-// reading /proc/<pid>/stat. Returns (zero, false) on any error or non-Linux systems.
+// reading <procRoot>/<pid>/stat. Returns (zero, false) on any error or non-Linux systems.
 func procStartTime(pid int) (time.Time, bool) {
-	data, err := os.ReadFile(fmt.Sprintf("/proc/%d/stat", pid))
+	data, err := os.ReadFile(filepath.Join(procRoot, strconv.Itoa(pid), "stat"))
 	if err != nil {
 		return time.Time{}, false
 	}
@@ -763,8 +778,8 @@ func procStartTime(pid int) (time.Time, bool) {
 	if err != nil {
 		return time.Time{}, false
 	}
-	// Read boot time from /proc/stat.
-	btimeData, err := os.ReadFile("/proc/stat")
+	// Read boot time from <procRoot>/stat.
+	btimeData, err := os.ReadFile(filepath.Join(procRoot, "stat"))
 	if err != nil {
 		return time.Time{}, false
 	}

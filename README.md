@@ -23,7 +23,7 @@ tmux 윈도우 이름 앞에 이모지를 붙여 Claude Code 에이전트 상태
 | 오류             | `🚨`      | 뭔가 문제가 생김 (최우선; 자동 트리거는 없고 `tmux-agent-bar hook error` 수동 호출용) |
 | 승인 대기        | `💬`      | 사용자 승인을 기다리는 중                            |
 | Plan 모드        | `⏸`      | Claude가 Plan 모드 실행 중                           |
-| 처리 중          | `🤖(5m)`  | Claude가 thinking/작업 중 (경과 시간, 분 단위·1분 미만 숨김) |
+| 처리 중          | `🤖(5m)`  | Claude가 thinking/작업 중 (경과 시간, 분 단위·1분 미만 숨김). 실행 모델별로 전환: ✨ Fable · 🌀 Opus · 🤖 Sonnet · 🖥️ Haiku (모델 불명 시 🤖) |
 | 백그라운드 대기  | `⏳(5m)`  | Claude가 background job(monitor/shell)을 두고 대기 중 (경과 시간) |
 | 완료             | `✅`      | 작업 완료                                            |
 | 없음             | ` `       | idle (Claude 없음 또는 대기 없음)                    |
@@ -132,6 +132,7 @@ set -g status-right-length 60
 - tmux의 각 pane에서 실행 중인 Claude Code 프로세스 상태 감지
 - 상태 이모지를 윈도우 이름 앞에 자동 삽입 (🚨 / 💬 / ⏸ / 🤖 / ⏳ / ✅)
 - 🤖 / ⏳ 상태에서 경과 시간 표시(분 단위, 1분 미만 숨김) — 각 상태 시작 기준으로 누적
+- 처리 중(🤖) 표시는 실행 모델에 따라 전환(✨ Fable · 🌀 Opus · 🤖 Sonnet · 🖥️ Haiku); pane meta의 모델 ID 기준이며 모델 불명 시 🤖. 상태 의미·우선순위는 불변이고 표기만 바뀜
 - ⏳ 상태: 상태가 `done`이어도 status tick 시점에 pane의 claude 프로세스에 살아있는 셸 자식(bash/sh 등 — run_in_background/Monitor 워커)이 있으면 ✅ 대신 ⏳로 표시한다. 잡이 끝나면 다음 tick부터 ✅로 돌아온다. claude가 npm shim(node) 아래에서 돌아도 프로세스 트리를 4단계까지 탐색해 감지하며, 상주 MCP 서버(셸 아닌 자식, 또는 cmdline에 `mcp`/`modelcontextprotocol`이 포함된 프로세스)는 잡으로 치지 않는다.
 - 상태 파일 GC: 닫힌 pane뿐 아니라 사라진 window/세션의 잔여 상태 파일도 status tick 중 주기적으로(최대 5분 간격) 정리한다.
 - `SessionEnd` hook으로 Claude 종료(또는 `/clear`) 즉시 해당 pane의 상태·meta 파일을 정리
@@ -158,6 +159,6 @@ set -g status-right-length 60
 
 예시:
 
-- pane 0: thinking (30초째), pane 1: idle → `🤖(30s)` 표시
-- pane 0: thinking (30초째), pane 1: waiting → `💬` 표시 (waiting이 우선)
-- pane 0: thinking (30초째), pane 1: thinking (5초째, 마지막 활성) → `🤖(5s)` 표시
+- pane 0: thinking (30분째), pane 1: idle → `🤖(30m)` 표시 (1분 미만 경과는 숨김)
+- pane 0: thinking (30분째), pane 1: waiting → `💬` 표시 (waiting이 우선)
+- pane 0: thinking (30분째), pane 1: thinking (5분째, 마지막 활성) → `🤖(5m)` 표시

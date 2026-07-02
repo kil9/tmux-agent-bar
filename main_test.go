@@ -259,6 +259,47 @@ func TestRemoveOrphanFiles_prefixIsNotSubstring(t *testing.T) {
 	}
 }
 
+// TestRemoveOrphanFiles_tmpLeftovers verifies that ".tmp-*" leftovers from a
+// crashed writeFileAtomic are reaped once older than orphanTmpMaxAge, while
+// recent ones (a possible in-flight write) and ordinary dotfiles are kept.
+func TestRemoveOrphanFiles_tmpLeftovers(t *testing.T) {
+	dir := t.TempDir()
+
+	old := time.Now().Add(-orphanTmpMaxAge - time.Minute)
+	recent := time.Now()
+	tests := []struct {
+		name     string
+		mtime    time.Time
+		wantKept bool
+	}{
+		{".tmp-123456", old, false},   // stale leftover -> reaped
+		{".tmp-789012", recent, true}, // in-flight write -> kept
+		{".gc", old, true},            // ordinary dotfile marker -> kept
+		{"main_0_0", old, true},       // live-window file -> kept
+	}
+	for _, tt := range tests {
+		p := filepath.Join(dir, tt.name)
+		if err := os.WriteFile(p, nil, 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Chtimes(p, tt.mtime, tt.mtime); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	removeOrphanFiles(dir, []string{"main_0"})
+
+	for _, tt := range tests {
+		_, err := os.Stat(filepath.Join(dir, tt.name))
+		if tt.wantKept && os.IsNotExist(err) {
+			t.Errorf("file %s was incorrectly removed", tt.name)
+		}
+		if !tt.wantKept && !os.IsNotExist(err) {
+			t.Errorf("stale file %s was not removed", tt.name)
+		}
+	}
+}
+
 // TestThinkingStateMtimePreserved verifies that writing "thinking" when the
 // state is already "thinking" does NOT update the file mtime.
 // This ensures the elapsed-time counter does not reset on repeated tool calls.
