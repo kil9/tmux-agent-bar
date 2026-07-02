@@ -749,34 +749,6 @@ func TestLooksLikeMCPServer(t *testing.T) {
 	}
 }
 
-// procTreeAvailableIn drives whether the claude-right liveness guard runs: when
-// it returns false (macOS has no /proc; some kernels lack CONFIG_PROC_CHILDREN),
-// the guard is skipped and the meta is trusted rather than deleted every render.
-func TestProcTreeAvailableIn(t *testing.T) {
-	const selfPID = 4242
-	cases := []struct {
-		name      string
-		selfPID   int
-		writeSelf bool // lay out root/<selfPID>/task/<selfPID>/children
-		want      bool
-	}{
-		{"children file present (Linux)", selfPID, true, true},
-		{"children file absent (macOS-like)", selfPID, false, false},
-		{"invalid self pid", 0, false, false},
-	}
-	for _, c := range cases {
-		t.Run(c.name, func(t *testing.T) {
-			root := t.TempDir()
-			if c.writeSelf {
-				writeFakeProc(t, root, c.selfPID, "tmux-agent-bar", nil)
-			}
-			if got := procTreeAvailableIn(root, c.selfPID); got != c.want {
-				t.Errorf("procTreeAvailableIn(root, %d) = %v, want %v", c.selfPID, got, c.want)
-			}
-		})
-	}
-}
-
 func setProcRootForTest(t *testing.T, dir string) {
 	t.Helper()
 	orig := procRoot
@@ -1061,25 +1033,6 @@ func TestClearPaneFiles(t *testing.T) {
 	}
 	if readState("sess_1_1") != "done" {
 		t.Error("neighboring pane state was removed")
-	}
-}
-
-func TestContextLimit(t *testing.T) {
-	t.Setenv("TMUX_AGENT_BAR_CTX_LIMIT", "")
-	if got := contextLimit(); got != defaultContextTokens {
-		t.Errorf("unset: got %d, want %d", got, defaultContextTokens)
-	}
-	t.Setenv("TMUX_AGENT_BAR_CTX_LIMIT", "1000000")
-	if got := contextLimit(); got != 1000000 {
-		t.Errorf("override: got %d, want 1000000", got)
-	}
-	t.Setenv("TMUX_AGENT_BAR_CTX_LIMIT", "banana")
-	if got := contextLimit(); got != defaultContextTokens {
-		t.Errorf("invalid: got %d, want %d", got, defaultContextTokens)
-	}
-	t.Setenv("TMUX_AGENT_BAR_CTX_LIMIT", "-5")
-	if got := contextLimit(); got != defaultContextTokens {
-		t.Errorf("negative: got %d, want %d", got, defaultContextTokens)
 	}
 }
 

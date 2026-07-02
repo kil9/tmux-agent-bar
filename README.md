@@ -29,7 +29,6 @@ tmux 윈도우 이름 앞에 이모지를 붙여 Claude Code 에이전트 상태
 | 없음             | ` `       | idle (Claude 없음 또는 대기 없음)                    |
 
 `status-left`에는 창번호와 현재 디렉토리가 각각 다른 배경색 세그먼트로 표시된다.
-`status-right`에는 Claude Code 활성 시 컨텍스트 사용률+모델이 별도 세그먼트로, 날짜와 시간이 하나의 세그먼트로 표시된다.
 
 ## 설치 및 실행
 
@@ -55,12 +54,6 @@ set -g window-status-current-format "#(tmux-agent-bar status #{window_index})#I 
 # status-left: [창번호|노랑-초록] [디렉토리|회색]
 set -g status-left "#[fg=colour16,bg=colour148,bold]  #I:#P #[fg=colour148,bg=colour241]<→>#[fg=colour231,bg=colour241] #{b:pane_current_path} #[fg=colour241,bg=colour234]<→>"
 set -g status-left-length 40
-
-# status-right: [ctx%+model|회색, Claude 활성 시] [날짜+시간|스틸 틸(colour66)]
-# claude-right가 ctx%+model 세그먼트와 날짜 세그먼트(bg=colour66) 진입 화살표까지 출력하므로,
-# 뒤에는 colour66 배경의 날짜 내용만 이어붙인다. (비활성 시에도 진입 화살표는 출력됨)
-set -g status-right "#(tmux-agent-bar claude-right #{pane_id})#[fg=colour231,bg=colour66]  %m/%d  %R "
-set -g status-right-length 60
 ```
 
 또는 `tmux-agent-bar install` 명령으로 위 설정을 `~/.tmux.conf`에 자동 추가하고 Claude Code hooks도 `~/.claude/settings.json`에 등록할 수 있다.
@@ -137,16 +130,8 @@ set -g status-right-length 60
 - 상태 파일 GC: 닫힌 pane뿐 아니라 사라진 window/세션의 잔여 상태 파일도 status tick 중 주기적으로(최대 5분 간격) 정리한다.
 - `SessionEnd` hook으로 Claude 종료(또는 `/clear`) 즉시 해당 pane의 상태·meta 파일을 정리
 - `status-left`: 창번호, hostname, 현재 디렉토리를 각각 다른 배경색 powerline 세그먼트로 표시
-- `status-right`: Claude Code 활성 pane 포커스 시 컨텍스트 사용률(%) + 모델명 표시; pane에 살아있는 claude가 없으면 표시하지 않고 stale meta를 정리
 - 기존 tmux 레이아웃·설정 변경 없이 동작 (별도 상태 바 불필요)
 - 완료(`✅`) 상태는 해당 윈도우를 활성화하면 자동으로 사라짐
-
-## 환경변수
-
-- `TMUX_AGENT_BAR_CTX_LIMIT`: 컨텍스트 사용률(%) 계산의 분모가 되는 토큰 수 (기본 200000).
-  1M 컨텍스트 세션을 주로 쓴다면 tmux 서버 환경에 지정한다. tmux를 띄우기 전 셸에서
-  `export TMUX_AGENT_BAR_CTX_LIMIT=1000000` 하거나, `~/.tmux.conf`에
-  `set-environment -g TMUX_AGENT_BAR_CTX_LIMIT 1000000`을 추가한다.
 
 ## 여러 pane 상태 집계 규칙
 

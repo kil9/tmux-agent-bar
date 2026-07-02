@@ -35,22 +35,19 @@ func main() {
 	// ~/.claude/settings.json; killing it mid-write could corrupt that file (and
 	// drop every hook), so it must not be subject to the 900ms watchdog.
 	switch subcmd {
-	case "status", "claude-right", "hook":
+	case "status", "hook":
 		go func() {
 			time.Sleep(900 * time.Millisecond)
-			switch subcmd {
-			case "status":
+			if subcmd == "status" {
 				// ⌛ = "status lookup timed out". Distinct from bg_waiting's ⏳.
 				fmt.Print("⌛")
-			case "claude-right":
-				fmt.Printf("#[fg=colour66,bg=colour234]\ue0ba")
 			}
 			os.Exit(124)
 		}()
 	}
 
 	if len(os.Args) < 2 {
-		fmt.Fprintln(os.Stderr, "usage: tmux-agent-bar <hook|status|claude-right|install> [args...]")
+		fmt.Fprintln(os.Stderr, "usage: tmux-agent-bar <hook|status|install> [args...]")
 		os.Exit(1)
 	}
 
@@ -67,12 +64,6 @@ func main() {
 			os.Exit(1)
 		}
 		runStatus(os.Args[2])
-	case "claude-right":
-		if len(os.Args) < 3 {
-			fmt.Fprintln(os.Stderr, "usage: tmux-agent-bar claude-right <pane_id>")
-			os.Exit(1)
-		}
-		runClaudeRight(os.Args[2])
 	case "install":
 		runInstall()
 	default:
@@ -390,68 +381,6 @@ func elapsedSuffix(start time.Time) string {
 		return fmt.Sprintf("#[fg=colour8](%s)#[fg=default]", timeStr)
 	}
 	return ""
-}
-
-// runClaudeRight outputs a tmux-format prefix for the status-right that includes:
-//   - when Claude Code is active: a ctx+model segment (bg=colour241) followed by
-//     the powerline separator transitioning into the date segment (bg=colour66)
-//   - when inactive: just the powerline separator into the date segment
-//
-// Called from tmux status-right via #(tmux-agent-bar claude-right #{pane_id}).
-// The caller's format string must continue with the date content on bg=colour66.
-func runClaudeRight(paneID string) {
-	const (
-		sep    = ""         // powerline left-pointing solid triangle (U+E0BA)
-		ctxBg  = "colour241" // context+model segment background
-		dateBg = "colour66"  // date segment background (steel teal)
-	)
-
-	// inactive: no ctx segment — just the transition into the date segment.
-	inactive := func() { fmt.Printf("#[fg=%s,bg=colour234]%s", dateBg, sep) }
-
-	session, windowIndex, pane, err := tmuxPaneParts(paneID)
-	if err != nil {
-		inactive()
-		return
-	}
-	key := stateKey(session, windowIndex, pane)
-	meta, ok := readMeta(key)
-	if !ok || meta.Model == "" {
-		inactive()
-		return
-	}
-	// The meta file can outlive the Claude Code session (SessionEnd doesn't
-	// fire on kill -9 etc.), so verify a claude process is actually alive in
-	// the pane before showing ctx%. Drop the stale meta when it isn't.
-	//
-	// Only trust an empty descendant set when the proc tree is actually
-	// walkable. On macOS (no /proc) and Linux kernels without
-	// CONFIG_PROC_CHILDREN, findClaudeDescendants always returns nothing, so
-	// running the guard there would wrongly delete the meta on every render and
-	// hide ctx% forever. When the proc tree is unavailable we trust the meta.
-	if procTreeAvailable() {
-		if pid, err := tmuxPanePID(paneID); err == nil && len(findClaudeDescendants(pid, bgWalkDepth)) == 0 {
-			os.Remove(filepath.Join(stateDir, key+".meta"))
-			inactive()
-			return
-		}
-	}
-
-	pct := meta.InputTokens * 100 / contextLimit()
-	if pct > 100 {
-		pct = 100
-	}
-	shortName := shortModelName(meta.Model)
-
-	// ctx+model segment, then separator transitioning into the date segment.
-	// colour121 (light green) for context %, colour148 (yellow-green) for model name.
-	fmt.Printf(
-		"#[fg=%s,bg=colour234]%s#[fg=colour121,bg=%s] %d%% #[fg=colour148]%s #[fg=%s,bg=%s]%s",
-		ctxBg, sep,
-		ctxBg,
-		pct, shortName,
-		dateBg, ctxBg, sep,
-	)
 }
 
 // paneTime pairs a pane index with the mtime of its state file.
@@ -941,32 +870,6 @@ func readProcChildren(pid int) []int {
 	return children
 }
 
-// procTreeAvailable reports whether this system exposes the per-process
-// children file the liveness guard relies on, judged by reading the calling
-// process's own file. See procTreeAvailableIn for why the children file — not
-// procRoot's existence — is the criterion.
-func procTreeAvailable() bool {
-	return procTreeAvailableIn(procRoot, os.Getpid())
-}
-
-// procTreeAvailableIn reports whether root exposes the children file for
-// selfPID (root/<selfPID>/task/<selfPID>/children). This is the file
-// findClaudeDescendants walks to enumerate a pane's descendants; when it is
-// unreadable, that walk always yields nothing, which must NOT be read as
-// "no claude alive". Two systems lack it: macOS has no /proc at all, and some
-// Linux kernels are built without CONFIG_PROC_CHILDREN (so /proc exists but the
-// children file does not) — hence the criterion is the file's readability, not
-// procRoot's existence. Pulled out as a pure, root-parameterised helper so the
-// guard-skip decision is unit-testable with a fixture proc tree.
-func procTreeAvailableIn(root string, selfPID int) bool {
-	if selfPID <= 0 {
-		return false
-	}
-	pidStr := strconv.Itoa(selfPID)
-	_, err := os.ReadFile(filepath.Join(root, pidStr, "task", pidStr, "children"))
-	return err == nil
-}
-
 // readProcComm returns the command name (comm) for the given pid from
 // /proc/<pid>/comm. Returns "" on any error.
 func readProcComm(pid int) string {
@@ -992,20 +895,6 @@ func readProcCmdline(pid int) string {
 		return ""
 	}
 	return strings.TrimSpace(strings.ReplaceAll(string(data), "\x00", " "))
-}
-
-// tmuxPanePID returns the pane_pid (the shell process PID) for the given
-// pane ID. Used at Stop-hook time to inspect the descendant process tree.
-func tmuxPanePID(paneID string) (int, error) {
-	out, err := tmuxCommand("display-message", "-p", "-t", paneID, "#{pane_pid}")
-	if err != nil {
-		return 0, err
-	}
-	pid, err := strconv.Atoi(strings.TrimSpace(string(out)))
-	if err != nil {
-		return 0, err
-	}
-	return pid, nil
 }
 
 // tmuxLastActivePaneIndex returns the pane_index of the most recently activated
@@ -1239,10 +1128,6 @@ set -g window-status-current-format "#(tmux-agent-bar status #{window_index})#I 
 # left: current directory basename
 set -g status-left "#[fg=colour16,bg=colour148,bold]  #I:#P #[fg=colour148,bg=colour241]` + "\ue0bc" + `#[fg=colour231,bg=colour241] #{b:pane_current_path} #[fg=colour241,bg=colour234]` + "\ue0bc" + `"
 set -g status-left-length 40
-# right: claude-right \uac00 ctx%+model \uc138\uadf8\uba3c\ud2b8\uc640 \ub0a0\uc9dc \uc138\uadf8\uba3c\ud2b8(bg=colour66) \uc9c4\uc785 \ud654\uc0b4\ud45c\uae4c\uc9c0 \ucd9c\ub825\ud558\ubbc0\ub85c
-# \ub4a4\uc5d0\ub294 colour66 \ubc30\uacbd\uc758 \ub0a0\uc9dc \ub0b4\uc6a9\ub9cc \uc774\uc5b4\ubd99\uc778\ub2e4.
-set -g status-right "#(tmux-agent-bar claude-right #{pane_id})#[fg=colour231,bg=colour66]  %m/%d  %R "
-set -g status-right-length 60
 `
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return err
@@ -1602,22 +1487,6 @@ func readMeta(key string) (PaneMeta, bool) {
 		return PaneMeta{}, false
 	}
 	return m, true
-}
-
-// defaultContextTokens is the assumed context-window size when
-// TMUX_AGENT_BAR_CTX_LIMIT is not set.
-const defaultContextTokens = 200000
-
-// contextLimit returns the denominator for the ctx% display. Sessions with a
-// larger context window (e.g. 1M) can override it by exporting
-// TMUX_AGENT_BAR_CTX_LIMIT=<tokens> into the tmux server's environment.
-func contextLimit() int {
-	if v := os.Getenv("TMUX_AGENT_BAR_CTX_LIMIT"); v != "" {
-		if n, err := strconv.Atoi(v); err == nil && n > 0 {
-			return n
-		}
-	}
-	return defaultContextTokens
 }
 
 // shortModelName returns a short display name for a Claude model ID.
