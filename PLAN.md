@@ -6,7 +6,7 @@
 
 - 표시 상태: `🚨` (error) > `💬` (waiting) > `⏸` (planning) > `🤖` (thinking) > `⏳` (bg_waiting) > `✅` (done) > idle
 - Claude Code hook 6종(`UserPromptSubmit`, `PreToolUse`, `Notification`, `Stop`, `SubagentStop`, `SessionEnd`)을 통해 상태 파일을 `/tmp/tmux-agent-bar/<key>` 에 기록한다.
-- `status-interval`(기본 30초) 주기의 `runStatus` 가 각 윈도우의 pane 상태를 집계해 윈도우 이름 앞에 이모지를 삽입한다. ⏳ 판정과 7일 GC 도 이 렌더 경로에서 수행한다.
+- `status-interval`(기본 30초) 주기의 `runStatus` 가 각 윈도우의 pane 상태를 집계해 윈도우 이름 앞에 이모지를 삽입한다. ⏳ 판정과 orphan GC(5분 throttle)도 이 렌더 경로에서 수행한다.
 
 ## 다음 할 일
 
@@ -35,7 +35,35 @@
 - 단위 테스트: 자식 프로세스 검사 함수가 fixture 디렉터리 기반으로 `true/false` 를 올바르게 반환한다.
 - 수동 시나리오: tmux pane 에서 Claude 가 `Bash run_in_background` 로 장기 실행 명령을 띄운 뒤 응답을 끝낸 직후 → 윈도우 라벨이 `⏳` 로 표시된다. 백그라운드 잡 종료 후 다음 status tick 에 `⏳` 가 사라진다.
 
+### 2. 사라진 window/세션의 잔여 상태 파일 GC ✅ 완료 (2026-06-27)
+
+**배경**: `cleanStaleFiles` 는 "현재 렌더링 중인 window 안의 닫힌 pane" 만 정리한다. window 나 세션이
+통째로 사라지면 `runStatus` 가 그 window 를 다시 순회하지 않아 상태 파일이 /tmp 가 비워질 때까지
+누적된다. uptime 이 긴 머신에서 며칠 전 파일이 그대로 남는 문제가 관측됨.
+
+**구현**: `cleanOrphanState` 가 status tick 중(최대 `orphanGCInterval`=5분 간격, `.gc` 마커로 throttle)
+`tmux list-windows -a -F "#S_#I"` 로 살아있는 window 키 집합을 만들고, 어떤 live window 키로도
+시작하지 않는 파일을 삭제한다. 죽은 window 와 죽은 세션을 모두 포괄한다.
+
+### 3. `⏳`(bg_waiting) 경과 시간 표시 ✅ 완료 (2026-06-27)
+
+**배경**: 태스크 1 에서 비목표로 남겨둔 항목. 백그라운드 대기가 길어질 때 얼마나 기다렸는지 보이지 않음.
+
+**구현**: 상태 파일(렌더 시점 판정 통합 후로는 Stop 이 기록한 `done`)은 대기 중 재기록되지 않으므로
+그 mtime 을 대기 시작 시각으로 재사용한다. `runStatus` 에서 🤖 와 동일하게 `formatElapsed`(분 단위)
+로 표시한다. 🤖/⏳ 공통 접미사 렌더링은 `elapsedSuffix` 로 추출.
+
 ## 디자인 결정
+
+### 디자인 결정: orphan GC 를 window 키 prefix 매칭으로 처리
+- **날짜**: 2026-06-27
+- **결정**: live window 키(`<session>_<window>`)를 모아 파일명이 `<키>_` 로 시작하는지로 생존 판정한다.
+  세션 단위가 아니라 window 단위로 보므로 "세션은 살아있지만 window 만 닫힌" 잔여 파일도 잡는다.
+  trailing `_` 를 붙여 `main_1` 이 `main_10_*` 를 오삭제하지 않게 한다.
+- **이유**: 안전성(live 파일은 절대 삭제 안 함)을 우선. live window 키 prefix 에 매칭되지 않을 때만
+  삭제하므로, 세션명/창번호에 `_` 가 섞인 경계에서도 live 파일을 지우는 일은 없다.
+- **대안**: (1) 세션 단위 GC → 닫힌 window 잔여물을 못 잡음. (2) 파일명 split 파싱 → 세션명에 `_` 가
+  있으면 깨짐.
 
 ### 디자인 결정: `bg_waiting` 감지를 "pane shell → claude → 자식 존재" 1단계 휴리스틱으로 한정 (2026-07-02 폐기)
 - **날짜**: 2026-05-22
@@ -59,4 +87,6 @@
 
 - 2026-05-22: 태스크 1(`bg_waiting` 상태 도입) 신규 등록.
 - 2026-05-22: 태스크 1 완료. 디자인 결정 2건 기록.
-- 2026-07-02: 점검에서 발견된 이슈 일괄 수정 — ⏳ 판정 렌더 시점 이동(npm shim 체인 대응 + 자기/조상 제외), `SessionEnd` hook 으로 pane 파일 즉시 정리, claude-right 에 stale meta 가드(살아있는 claude 없으면 미표시+정리), `TMUX_AGENT_BAR_CTX_LIMIT` 환경변수(1M 컨텍스트 대응), status 타임아웃 폴백 ⏳→⌛ 충돌 해소, install 템플릿 status-right 색 정합(colour66), 7일 GC, 상태 파일 원자적 쓰기, `shortModelName` fable/mythos 추가, 죽은 코드(`recentSubagentStop`) 제거.
+- 2026-06-27: 태스크 2(orphan window/세션 GC), 태스크 3(`⏳` 경과 시간) 완료. 디자인 결정 1건 기록.
+- 2026-07-02: 점검에서 발견된 이슈 일괄 수정 — ⏳ 판정 렌더 시점 이동(npm shim 체인 대응 + 자기/조상 제외), `SessionEnd` hook 으로 pane 파일 즉시 정리, claude-right 에 stale meta 가드(살아있는 claude 없으면 미표시+정리), `TMUX_AGENT_BAR_CTX_LIMIT` 환경변수(1M 컨텍스트 대응), status 타임아웃 폴백 ⏳→⌛ 충돌 해소, install 템플릿 status-right 색 정합(colour66), 상태 파일 원자적 쓰기, `shortModelName` fable/mythos 추가, 죽은 코드(`recentSubagentStop`) 제거.
+- 2026-07-02: github/main(6/27-28 개인 머신 작업) 병합 — ⏳ 판정은 렌더 시점 방식으로 통일하고, 셸 comm 허용목록에 `looksLikeMCPServer` cmdline 가드를 결합. GC 는 orphan GC(window 키 prefix, 5분 throttle)를 채택하고 7일 mtime GC 는 폐기. ⏳ 경과시간 표시는 resolved 상태 기준으로 각색해 채택.

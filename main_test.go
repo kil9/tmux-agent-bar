@@ -201,6 +201,64 @@ func TestCleanStaleFiles(t *testing.T) {
 	}
 }
 
+// TestRemoveOrphanFiles verifies that files from dead windows/sessions are
+// removed while files from live windows (and dotfile markers) are kept.
+func TestRemoveOrphanFiles(t *testing.T) {
+	dir := t.TempDir()
+
+	// Live window main:0 with state + markers.
+	writeStateToDir(t, dir, "main_0_0", "thinking")
+	if err := os.WriteFile(filepath.Join(dir, "main_0_0.meta"), nil, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	// Orphan window (main has no window 1) and orphan session ("gone").
+	writeStateToDir(t, dir, "main_1_0", "done")
+	if err := os.WriteFile(filepath.Join(dir, "main_1_3.subagent_stop"), nil, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	writeStateToDir(t, dir, "gone_0_0", "done")
+	// The GC throttle marker must never be deleted.
+	if err := os.WriteFile(filepath.Join(dir, ".gc"), nil, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	// Only window main:0 is live.
+	removeOrphanFiles(dir, []string{"main_0"})
+
+	// Orphan-window and orphan-session files gone.
+	for _, name := range []string{"main_1_0", "main_1_3.subagent_stop", "gone_0_0"} {
+		if _, err := os.Stat(filepath.Join(dir, name)); !os.IsNotExist(err) {
+			t.Errorf("orphan file %s was not removed", name)
+		}
+	}
+	// Live-window files and the dotfile marker kept.
+	for _, name := range []string{"main_0_0", "main_0_0.meta", ".gc"} {
+		if _, err := os.Stat(filepath.Join(dir, name)); os.IsNotExist(err) {
+			t.Errorf("file %s was incorrectly removed", name)
+		}
+	}
+}
+
+// TestRemoveOrphanFiles_prefixIsNotSubstring guards against deleting a live
+// window whose key is a prefix-collision with another (e.g. "k9box_0" must not
+// match a file from window "k9box_01", and "main_1" must not reap "main_10_*").
+func TestRemoveOrphanFiles_prefixIsNotSubstring(t *testing.T) {
+	dir := t.TempDir()
+	writeStateToDir(t, dir, "main_1_0", "done")  // live window main:1
+	writeStateToDir(t, dir, "main_10_0", "done") // dead window main:10
+
+	// Only window main:1 is live. The trailing "_" in the prefix match must keep
+	// main_1_* and remove main_10_* without confusing the two.
+	removeOrphanFiles(dir, []string{"main_1"})
+
+	if _, err := os.Stat(filepath.Join(dir, "main_1_0")); os.IsNotExist(err) {
+		t.Error("live window main_1_0 was incorrectly removed")
+	}
+	if _, err := os.Stat(filepath.Join(dir, "main_10_0")); !os.IsNotExist(err) {
+		t.Error("dead window main_10_0 was not removed")
+	}
+}
+
 // TestThinkingStateMtimePreserved verifies that writing "thinking" when the
 // state is already "thinking" does NOT update the file mtime.
 // This ensures the elapsed-time counter does not reset on repeated tool calls.
@@ -280,8 +338,8 @@ func TestThinkingStartMarkerCreatedFromStaleState(t *testing.T) {
 	}
 }
 
-// TestSelectThinkingTime verifies that selectThinkingTime picks the correct pane.
-func TestSelectThinkingTime(t *testing.T) {
+// TestSelectPaneStartTime verifies that selectPaneStartTime picks the correct pane.
+func TestSelectPaneStartTime(t *testing.T) {
 	t0 := time.Now().Add(-30 * time.Second)
 	t1 := time.Now().Add(-5 * time.Second)
 
@@ -291,35 +349,35 @@ func TestSelectThinkingTime(t *testing.T) {
 	}
 
 	t.Run("empty", func(t *testing.T) {
-		_, ok := selectThinkingTime(nil, "")
+		_, ok := selectPaneStartTime(nil, "")
 		if ok {
 			t.Error("expected false for empty slice")
 		}
 	})
 
 	t.Run("single pane", func(t *testing.T) {
-		got, ok := selectThinkingTime(panes[:1], "99")
+		got, ok := selectPaneStartTime(panes[:1], "99")
 		if !ok || !got.Equal(t0) {
 			t.Errorf("got %v ok=%v, want %v true", got, ok, t0)
 		}
 	})
 
 	t.Run("last active is pane 1 (newer)", func(t *testing.T) {
-		got, ok := selectThinkingTime(panes, "1")
+		got, ok := selectPaneStartTime(panes, "1")
 		if !ok || !got.Equal(t1) {
 			t.Errorf("got %v ok=%v, want %v (pane 1 mtime) true", got, ok, t1)
 		}
 	})
 
 	t.Run("last active is pane 0 (older)", func(t *testing.T) {
-		got, ok := selectThinkingTime(panes, "0")
+		got, ok := selectPaneStartTime(panes, "0")
 		if !ok || !got.Equal(t0) {
 			t.Errorf("got %v ok=%v, want %v (pane 0 mtime) true", got, ok, t0)
 		}
 	})
 
 	t.Run("last active not in thinking panes — fallback to earliest", func(t *testing.T) {
-		got, ok := selectThinkingTime(panes, "99")
+		got, ok := selectPaneStartTime(panes, "99")
 		if !ok || !got.Equal(t0) {
 			t.Errorf("got %v ok=%v, want %v (earliest) true", got, ok, t0)
 		}
@@ -626,6 +684,30 @@ func TestResolvePaneStateOrClear_doneWithLiveJobShowsBgWaiting(t *testing.T) {
 
 // --- background-job detection ---
 
+func TestLooksLikeMCPServer(t *testing.T) {
+	cases := []struct {
+		name    string
+		cmdline string
+		want    bool
+	}{
+		{"ccs websearch server", "node /home/u/.ccs/mcp/ccs-websearch-server.cjs", true},
+		{"ccs image server", "node /home/u/.ccs/mcp/ccs-image-analysis-server.cjs", true},
+		{"npx modelcontextprotocol", "npx -y @modelcontextprotocol/server-filesystem /tmp", true},
+		{"uvx mcp server", "uvx mcp-server-git", true},
+		{"uppercase MCP", "node /opt/MCP/server.js", true},
+		{"plain background bash", "bash -c sleep 600", false},
+		{"dev server without mcp", "node /home/u/app/server.js", false},
+		{"empty (proc gone)", "", false},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if got := looksLikeMCPServer(c.cmdline); got != c.want {
+				t.Errorf("looksLikeMCPServer(%q) = %v, want %v", c.cmdline, got, c.want)
+			}
+		})
+	}
+}
+
 func setProcRootForTest(t *testing.T, dir string) {
 	t.Helper()
 	orig := procRoot
@@ -654,6 +736,21 @@ func writeFakeProc(t *testing.T, root string, pid int, comm string, children []i
 		body += "\n"
 	}
 	if err := os.WriteFile(filepath.Join(taskDir, "children"), []byte(body), 0o644); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// writeFakeCmdline writes /proc/<pid>/cmdline (NUL-separated, as the kernel
+// presents it) so readProcCmdline can read it back. writeFakeProc must have
+// been called for pid first so the directory exists.
+func writeFakeCmdline(t *testing.T, root string, pid int, args ...string) {
+	t.Helper()
+	body := strings.Join(args, "\x00")
+	if body != "" {
+		body += "\x00"
+	}
+	path := filepath.Join(root, strconv.Itoa(pid), "cmdline")
+	if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -704,6 +801,54 @@ func TestPaneHasBackgroundJobs_nonClaudeChildIgnored(t *testing.T) {
 
 	if paneHasBackgroundJobs(1000) {
 		t.Error("expected false when the live grandchild is under a non-claude process")
+	}
+}
+
+func TestPaneHasBackgroundJobs_mcpServersIgnored(t *testing.T) {
+	root := t.TempDir()
+	setProcRootForTest(t, root)
+	// pane shell → claude → two node MCP servers (always alive for the session).
+	writeFakeProc(t, root, 1000, "bash", []int{1001})
+	writeFakeProc(t, root, 1001, "claude", []int{1002, 1003})
+	writeFakeProc(t, root, 1002, "node", nil)
+	writeFakeCmdline(t, root, 1002, "node", "/home/u/.ccs/mcp/ccs-websearch-server.cjs")
+	writeFakeProc(t, root, 1003, "node", nil)
+	writeFakeCmdline(t, root, 1003, "node", "/home/u/.ccs/mcp/ccs-image-analysis-server.cjs")
+
+	if paneHasBackgroundJobs(1000) {
+		t.Error("expected false when claude's only children are MCP servers")
+	}
+}
+
+func TestPaneHasBackgroundJobs_realJobAmongMCPServers(t *testing.T) {
+	root := t.TempDir()
+	setProcRootForTest(t, root)
+	// pane shell → claude → MCP server + a real background bash.
+	writeFakeProc(t, root, 1000, "bash", []int{1001})
+	writeFakeProc(t, root, 1001, "claude", []int{1002, 1003})
+	writeFakeProc(t, root, 1002, "node", nil)
+	writeFakeCmdline(t, root, 1002, "node", "/home/u/.ccs/mcp/ccs-websearch-server.cjs")
+	writeFakeProc(t, root, 1003, "bash", nil)
+	writeFakeCmdline(t, root, 1003, "bash", "-c", "sleep 600")
+
+	if !paneHasBackgroundJobs(1000) {
+		t.Error("expected true when a real background job sits alongside MCP servers")
+	}
+}
+
+// A shell-comm child running an MCP server (e.g. an MCP configured as
+// "bash -c npx @modelcontextprotocol/...") passes the shell allowlist but must
+// still be excluded by the cmdline guard.
+func TestPaneHasBackgroundJobs_shellWrappedMCPIgnored(t *testing.T) {
+	root := t.TempDir()
+	setProcRootForTest(t, root)
+	writeFakeProc(t, root, 1000, "zsh", []int{1001})
+	writeFakeProc(t, root, 1001, "claude", []int{1002})
+	writeFakeProc(t, root, 1002, "bash", nil)
+	writeFakeCmdline(t, root, 1002, "bash", "-c", "npx -y @modelcontextprotocol/server-filesystem /tmp")
+
+	if paneHasBackgroundJobs(1000) {
+		t.Error("expected false for a shell-wrapped MCP server child")
 	}
 }
 
@@ -769,7 +914,9 @@ func TestPaneHasBackgroundJobs_depthCapped(t *testing.T) {
 // Long-lived non-shell children of claude — MCP servers (docker/python/node),
 // statusline wrappers — are session infrastructure and must not count as
 // background jobs, or every session with an MCP server would show ⏳ forever.
-func TestPaneHasBackgroundJobs_mcpServersIgnored(t *testing.T) {
+// (Comm-based guard; the cmdline-based looksLikeMCPServer guard is covered by
+// TestPaneHasBackgroundJobs_mcpServersIgnored.)
+func TestPaneHasBackgroundJobs_infraChildrenIgnored(t *testing.T) {
 	root := t.TempDir()
 	setProcRootForTest(t, root)
 	// claude with typical idle-session children: docker/python MCP servers
@@ -845,33 +992,6 @@ func TestClearPaneFiles(t *testing.T) {
 	}
 	if readState("sess_1_1") != "done" {
 		t.Error("neighboring pane state was removed")
-	}
-}
-
-func TestGcStaleFiles(t *testing.T) {
-	dir := t.TempDir()
-
-	oldPath := filepath.Join(dir, "dead_1_0.meta")
-	if err := os.WriteFile(oldPath, []byte("x"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	old := time.Now().Add(-(stateFileTTL + time.Hour))
-	if err := os.Chtimes(oldPath, old, old); err != nil {
-		t.Fatal(err)
-	}
-
-	freshPath := filepath.Join(dir, "live_1_0")
-	if err := os.WriteFile(freshPath, []byte("done"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-
-	gcStaleFiles(dir, stateFileTTL)
-
-	if _, err := os.Stat(oldPath); !os.IsNotExist(err) {
-		t.Error("stale file was not removed")
-	}
-	if _, err := os.Stat(freshPath); err != nil {
-		t.Error("fresh file was incorrectly removed")
 	}
 }
 

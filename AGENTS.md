@@ -126,9 +126,10 @@
 run_in_background·Monitor 워커가 뜨는 형태)이 있으면 ⏳로 표시한다. Stop hook 시점에는 hook
 프로세스 자신(및 병렬 실행되는 다른 Stop hook)이 claude의 자식이라 오탐을 피할 수 없기 때문이다.
 셸이 아닌 상주 자식(docker/python/node 등 MCP 서버, statusline 래퍼)은 세션 인프라라 잡으로
-치지 않으며, 자기 자신과 조상 프로세스도 카운트에서 제외한다.
+치지 않고, 셸 자식이라도 cmdline 에 `mcp`/`modelcontextprotocol` 이 포함되면(`looksLikeMCPServer`)
+제외하며, 자기 자신과 조상 프로세스도 카운트에서 제외한다.
 
-`thinking` 상태는 TTL을 두어, Stop hook이 발사되지 않은 채 종료된 죽은 세션에서 🤖가 영구히 남는 것을 방지한다. 추가로 `runStatus`가 7일 이상 방치된 상태 파일을 GC 한다.
+`thinking` 상태는 TTL을 두어, Stop hook이 발사되지 않은 채 종료된 죽은 세션에서 🤖가 영구히 남는 것을 방지한다. 추가로 `runStatus`가 사라진 window/세션의 잔여 파일을 주기적으로(최대 5분 간격, `.gc` 마커로 throttle) GC 한다.
 
 ### 프로젝트 구조
 

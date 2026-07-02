@@ -234,26 +234,75 @@ func cleanStaleFiles(dir, session, windowIndex string, alivePanes []string) {
 	}
 }
 
-// stateFileTTL is how long a state-dir file may go untouched before the
-// opportunistic GC in runStatus removes it. Cleans up leftovers from sessions
-// that died without firing hooks (kill -9, host reboot, dead tmux sessions).
-const stateFileTTL = 7 * 24 * time.Hour
+// orphanGCInterval bounds how often cleanOrphanState scans the state
+// directory, regardless of how many windows/ticks call it.
+const orphanGCInterval = 5 * time.Minute
 
-// gcStaleFiles removes files in dir whose mtime is older than ttl.
-func gcStaleFiles(dir string, ttl time.Duration) {
+// cleanOrphanState removes state files whose (session, window) no longer exists.
+// cleanStaleFiles only reaps closed panes within a window that is still being
+// rendered; when a whole window or session is torn down, runStatus never
+// iterates it again, so its files would otherwise linger until /tmp is cleared.
+// Throttled via a marker file so the directory scan runs at most once per
+// orphanGCInterval.
+func cleanOrphanState() {
+	marker := filepath.Join(stateDir, ".gc")
+	if info, err := os.Stat(marker); err == nil && time.Since(info.ModTime()) < orphanGCInterval {
+		return
+	}
+
+	windowKeys, err := tmuxListWindowKeys()
+	if err != nil || len(windowKeys) == 0 {
+		// tmux unavailable or returned nothing — never risk deleting live state.
+		return
+	}
+
+	// Touch the marker before scanning so a slow/failing scan doesn't run every tick.
+	_ = os.WriteFile(marker, nil, 0o644)
+	removeOrphanFiles(stateDir, windowKeys)
+}
+
+// removeOrphanFiles deletes every entry in dir whose name does not belong to one
+// of the live windows. A file belongs to a window when its name starts with
+// "<session>_<window>_". Dotfiles (e.g. the .gc marker) are skipped. Pure
+// side-effect on the filesystem so it can be unit-tested without tmux.
+func removeOrphanFiles(dir string, liveWindowKeys []string) {
 	entries, err := os.ReadDir(dir)
 	if err != nil {
 		return
 	}
 	for _, e := range entries {
-		info, err := e.Info()
-		if err != nil {
+		name := e.Name()
+		if strings.HasPrefix(name, ".") {
 			continue
 		}
-		if time.Since(info.ModTime()) > ttl {
-			os.Remove(filepath.Join(dir, e.Name()))
+		live := false
+		for _, k := range liveWindowKeys {
+			if strings.HasPrefix(name, k+"_") {
+				live = true
+				break
+			}
+		}
+		if !live {
+			os.Remove(filepath.Join(dir, name))
 		}
 	}
+}
+
+// tmuxListWindowKeys returns "<session>_<window>" for every live window across
+// all sessions — the prefix (minus the trailing pane component) of the state
+// file keys produced by stateKey.
+func tmuxListWindowKeys() ([]string, error) {
+	out, err := tmuxCommand("list-windows", "-a", "-F", "#S_#I")
+	if err != nil {
+		return nil, err
+	}
+	var keys []string
+	for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
+		if k := strings.TrimSpace(line); k != "" {
+			keys = append(keys, k)
+		}
+	}
+	return keys, nil
 }
 
 // formatElapsed renders a thinking elapsed time for the status bar at
@@ -281,6 +330,10 @@ func runStatus(windowIndex string) {
 		return
 	}
 
+	// Opportunistically reap state files from windows/sessions that no longer
+	// exist. Throttled internally, so this is cheap to call on every status tick.
+	cleanOrphanState()
+
 	emoji := aggregateWindowEmoji(session, windowIndex)
 
 	// If the window shows ✅ and the user has activated (is currently viewing) it,
@@ -292,19 +345,29 @@ func runStatus(windowIndex string) {
 		}
 	}
 
-	// For thinking state, append elapsed time in dimmed color.
-	if emoji == "🤖" {
+	// For long-running states, append elapsed time in dimmed color.
+	switch emoji {
+	case "🤖":
 		if start, ok := thinkingStartTime(session, windowIndex); ok {
-			if timeStr := formatElapsed(int(time.Since(start).Seconds())); timeStr != "" {
-				emoji += fmt.Sprintf("#[fg=colour8](%s)#[fg=default]", timeStr)
-			}
+			emoji += elapsedSuffix(start)
+		}
+	case "⏳":
+		if start, ok := bgWaitingStartTime(session, windowIndex); ok {
+			emoji += elapsedSuffix(start)
 		}
 	}
 
 	fmt.Print(emoji)
+}
 
-	// Opportunistic GC for files no hook will ever clean again.
-	gcStaleFiles(stateDir, stateFileTTL)
+// elapsedSuffix renders the dimmed "(elapsed)" suffix appended to the 🤖 and ⏳
+// emojis. Returns "" when the elapsed time is under the display threshold (see
+// formatElapsed), so nothing is shown for the first minute.
+func elapsedSuffix(start time.Time) string {
+	if timeStr := formatElapsed(int(time.Since(start).Seconds())); timeStr != "" {
+		return fmt.Sprintf("#[fg=colour8](%s)#[fg=default]", timeStr)
+	}
+	return ""
 }
 
 // runClaudeRight outputs a tmux-format prefix for the status-right that includes:
@@ -316,7 +379,7 @@ func runStatus(windowIndex string) {
 // The caller's format string must continue with the date content on bg=colour66.
 func runClaudeRight(paneID string) {
 	const (
-		sep    = "\ue0ba"    // powerline left-pointing solid triangle (U+E0BA)
+		sep    = ""         // powerline left-pointing solid triangle (U+E0BA)
 		ctxBg  = "colour241" // context+model segment background
 		dateBg = "colour66"  // date segment background (steel teal)
 	)
@@ -366,28 +429,29 @@ type paneTime struct {
 	mtime time.Time
 }
 
-// selectThinkingTime picks the start time to display from a list of thinking
-// panes and the index of the most-recently-activated pane.
+// selectPaneStartTime picks the start time to display from a list of candidate
+// panes (those sharing the displayed state, e.g. thinking or bg_waiting) and the
+// index of the most-recently-activated pane.
 //
-//   - 0 panes thinking → false
-//   - 1 pane thinking → its mtime
-//   - multiple panes thinking + lastActive is one of them → that pane's mtime
-//   - multiple panes thinking + lastActive not among them → earliest mtime
-func selectThinkingTime(thinking []paneTime, lastActive string) (time.Time, bool) {
-	if len(thinking) == 0 {
+//   - 0 candidate panes → false
+//   - 1 candidate pane → its mtime
+//   - multiple candidates + lastActive is one of them → that pane's mtime
+//   - multiple candidates + lastActive not among them → earliest mtime
+func selectPaneStartTime(candidates []paneTime, lastActive string) (time.Time, bool) {
+	if len(candidates) == 0 {
 		return time.Time{}, false
 	}
-	if len(thinking) == 1 {
-		return thinking[0].mtime, true
+	if len(candidates) == 1 {
+		return candidates[0].mtime, true
 	}
-	for _, pt := range thinking {
+	for _, pt := range candidates {
 		if pt.index == lastActive {
 			return pt.mtime, true
 		}
 	}
 	// Fallback: earliest mtime.
-	earliest := thinking[0].mtime
-	for _, pt := range thinking[1:] {
+	earliest := candidates[0].mtime
+	for _, pt := range candidates[1:] {
 		if pt.mtime.Before(earliest) {
 			earliest = pt.mtime
 		}
@@ -431,7 +495,36 @@ func thinkingStartTime(session, windowIndex string) (time.Time, bool) {
 	}
 
 	lastActive, _ := tmuxLastActivePaneIndex(session, windowIndex)
-	return selectThinkingTime(thinking, lastActive)
+	return selectPaneStartTime(thinking, lastActive)
+}
+
+// bgWaitingStartTime returns the time from which the ⏳ (bg_waiting) elapsed
+// counter should run for the given window. When multiple panes wait, selection
+// mirrors thinkingStartTime (last-active, else earliest).
+func bgWaitingStartTime(session, windowIndex string) (time.Time, bool) {
+	panes, err := tmuxListPanesWithCreated(session, windowIndex)
+	if err != nil {
+		return time.Time{}, false
+	}
+
+	var waiting []paneTime
+	for _, pane := range panes {
+		// Resolve render-time: a pane displays ⏳ while its recorded "done"
+		// (written once at Stop, never rewritten while the job runs) has a
+		// live background job, so that file's mtime marks when waiting began.
+		if resolvePaneStateOrClear(session, windowIndex, pane) != "bg_waiting" {
+			continue
+		}
+		key := stateKey(session, windowIndex, pane.index)
+		info, err := os.Stat(filepath.Join(stateDir, key))
+		if err != nil {
+			continue
+		}
+		waiting = append(waiting, paneTime{index: pane.index, mtime: info.ModTime()})
+	}
+
+	lastActive, _ := tmuxLastActivePaneIndex(session, windowIndex)
+	return selectPaneStartTime(waiting, lastActive)
 }
 
 // stateKey returns the state file name for a given session, window, and pane.
@@ -667,6 +760,12 @@ var bgJobComms = map[string]bool{"bash": true, "sh": true, "zsh": true, "dash": 
 // running (Bash run_in_background, Monitor) after its response ended. This
 // catches the case where Stop fired but the work is not actually done.
 //
+// Two guards keep session infrastructure from pinning panes to ⏳:
+//   - only shell children (bgJobComms) count — MCP servers and statusline
+//     wrappers run as node/docker/python and live for the whole session;
+//   - shell-wrapped MCP servers are additionally filtered by cmdline
+//     (looksLikeMCPServer).
+//
 // The calling process and its ancestors are excluded from the child check:
 // when this runs from a Claude Code hook, the hook shell itself is a child
 // of claude and must not count as a background job.
@@ -674,9 +773,13 @@ func paneHasBackgroundJobs(panePID int) bool {
 	exclude := selfAncestors()
 	for _, claudePID := range findClaudeDescendants(panePID, bgWalkDepth) {
 		for _, child := range readProcChildren(claudePID) {
-			if bgJobComms[readProcComm(child)] && !exclude[child] {
-				return true
+			if !bgJobComms[readProcComm(child)] || exclude[child] {
+				continue
 			}
+			if looksLikeMCPServer(readProcCmdline(child)) {
+				continue
+			}
+			return true
 		}
 	}
 	return false
@@ -742,6 +845,19 @@ func procPPID(pid int) int {
 	return ppid
 }
 
+// looksLikeMCPServer reports whether cmdline looks like a Model Context
+// Protocol server that Claude keeps alive for the whole session rather than a
+// background work process. Matched case-insensitively by either "mcp"
+// (covers .../.ccs/mcp/...-server.cjs, uvx mcp-server-...) or the full
+// "modelcontextprotocol" — the canonical npx @modelcontextprotocol/server-...
+// form does NOT contain the substring "mcp", so it must be matched separately.
+// Empty cmdline (proc gone / unreadable) is treated as not-an-MCP-server so
+// genuine background jobs still register.
+func looksLikeMCPServer(cmdline string) bool {
+	lc := strings.ToLower(cmdline)
+	return strings.Contains(lc, "mcp") || strings.Contains(lc, "modelcontextprotocol")
+}
+
 // readProcChildren returns the direct child PIDs of pid by reading
 // /proc/<pid>/task/<pid>/children. Returns nil on any error or non-Linux
 // systems (where the file doesn't exist).
@@ -779,6 +895,20 @@ func readProcComm(pid int) string {
 		return ""
 	}
 	return strings.TrimSpace(string(data))
+}
+
+// readProcCmdline returns the full command line for pid from
+// /proc/<pid>/cmdline, with the NUL argument separators replaced by spaces.
+// Returns "" on any error (including a process that has already exited).
+func readProcCmdline(pid int) string {
+	if pid <= 0 {
+		return ""
+	}
+	data, err := os.ReadFile(filepath.Join(procRoot, strconv.Itoa(pid), "cmdline"))
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(strings.ReplaceAll(string(data), "\x00", " "))
 }
 
 // tmuxPanePID returns the pane_pid (the shell process PID) for the given
