@@ -708,6 +708,34 @@ func TestLooksLikeMCPServer(t *testing.T) {
 	}
 }
 
+// procTreeAvailableIn drives whether the claude-right liveness guard runs: when
+// it returns false (macOS has no /proc; some kernels lack CONFIG_PROC_CHILDREN),
+// the guard is skipped and the meta is trusted rather than deleted every render.
+func TestProcTreeAvailableIn(t *testing.T) {
+	const selfPID = 4242
+	cases := []struct {
+		name      string
+		selfPID   int
+		writeSelf bool // lay out root/<selfPID>/task/<selfPID>/children
+		want      bool
+	}{
+		{"children file present (Linux)", selfPID, true, true},
+		{"children file absent (macOS-like)", selfPID, false, false},
+		{"invalid self pid", 0, false, false},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			root := t.TempDir()
+			if c.writeSelf {
+				writeFakeProc(t, root, c.selfPID, "tmux-agent-bar", nil)
+			}
+			if got := procTreeAvailableIn(root, c.selfPID); got != c.want {
+				t.Errorf("procTreeAvailableIn(root, %d) = %v, want %v", c.selfPID, got, c.want)
+			}
+		})
+	}
+}
+
 func setProcRootForTest(t *testing.T, dir string) {
 	t.Helper()
 	orig := procRoot

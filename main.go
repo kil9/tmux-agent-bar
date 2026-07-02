@@ -400,10 +400,18 @@ func runClaudeRight(paneID string) {
 	// The meta file can outlive the Claude Code session (SessionEnd doesn't
 	// fire on kill -9 etc.), so verify a claude process is actually alive in
 	// the pane before showing ctx%. Drop the stale meta when it isn't.
-	if pid, err := tmuxPanePID(paneID); err == nil && len(findClaudeDescendants(pid, bgWalkDepth)) == 0 {
-		os.Remove(filepath.Join(stateDir, key+".meta"))
-		inactive()
-		return
+	//
+	// Only trust an empty descendant set when the proc tree is actually
+	// walkable. On macOS (no /proc) and Linux kernels without
+	// CONFIG_PROC_CHILDREN, findClaudeDescendants always returns nothing, so
+	// running the guard there would wrongly delete the meta on every render and
+	// hide ctx% forever. When the proc tree is unavailable we trust the meta.
+	if procTreeAvailable() {
+		if pid, err := tmuxPanePID(paneID); err == nil && len(findClaudeDescendants(pid, bgWalkDepth)) == 0 {
+			os.Remove(filepath.Join(stateDir, key+".meta"))
+			inactive()
+			return
+		}
 	}
 
 	pct := meta.InputTokens * 100 / contextLimit()
@@ -882,6 +890,32 @@ func readProcChildren(pid int) []int {
 		}
 	}
 	return children
+}
+
+// procTreeAvailable reports whether this system exposes the per-process
+// children file the liveness guard relies on, judged by reading the calling
+// process's own file. See procTreeAvailableIn for why the children file — not
+// procRoot's existence — is the criterion.
+func procTreeAvailable() bool {
+	return procTreeAvailableIn(procRoot, os.Getpid())
+}
+
+// procTreeAvailableIn reports whether root exposes the children file for
+// selfPID (root/<selfPID>/task/<selfPID>/children). This is the file
+// findClaudeDescendants walks to enumerate a pane's descendants; when it is
+// unreadable, that walk always yields nothing, which must NOT be read as
+// "no claude alive". Two systems lack it: macOS has no /proc at all, and some
+// Linux kernels are built without CONFIG_PROC_CHILDREN (so /proc exists but the
+// children file does not) — hence the criterion is the file's readability, not
+// procRoot's existence. Pulled out as a pure, root-parameterised helper so the
+// guard-skip decision is unit-testable with a fixture proc tree.
+func procTreeAvailableIn(root string, selfPID int) bool {
+	if selfPID <= 0 {
+		return false
+	}
+	pidStr := strconv.Itoa(selfPID)
+	_, err := os.ReadFile(filepath.Join(root, pidStr, "task", pidStr, "children"))
+	return err == nil
 }
 
 // readProcComm returns the command name (comm) for the given pid from
