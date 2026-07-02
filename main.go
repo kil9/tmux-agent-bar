@@ -351,7 +351,11 @@ func runStatus(windowIndex string) {
 	// For long-running states, append elapsed time in dimmed color.
 	switch emoji {
 	case "🤖":
-		if start, ok := thinkingStartTime(session, windowIndex); ok {
+		if start, pane, ok := thinkingStartTime(session, windowIndex); ok {
+			// Swap the generic 🤖 for the model-specific emoji, reading the
+			// meta of the same pane the elapsed time describes. The elapsed
+			// suffix is appended unchanged (e.g. ✨(5m)).
+			emoji = thinkingDisplayEmoji(stateKey(session, windowIndex, pane))
 			emoji += elapsedSuffix(start)
 		}
 	case "⏳":
@@ -441,47 +445,56 @@ type paneTime struct {
 	mtime time.Time
 }
 
-// selectPaneStartTime picks the start time to display from a list of candidate
-// panes (those sharing the displayed state, e.g. thinking or bg_waiting) and the
-// index of the most-recently-activated pane.
+// selectPane picks the candidate pane to display from a list of candidates
+// (those sharing the displayed state, e.g. thinking or bg_waiting) and the index
+// of the most-recently-activated pane.
 //
 //   - 0 candidate panes → false
-//   - 1 candidate pane → its mtime
-//   - multiple candidates + lastActive is one of them → that pane's mtime
+//   - 1 candidate pane → that pane
+//   - multiple candidates + lastActive is one of them → that pane
 //   - multiple candidates + lastActive not among them → earliest mtime
-func selectPaneStartTime(candidates []paneTime, lastActive string) (time.Time, bool) {
+func selectPane(candidates []paneTime, lastActive string) (paneTime, bool) {
 	if len(candidates) == 0 {
-		return time.Time{}, false
+		return paneTime{}, false
 	}
 	if len(candidates) == 1 {
-		return candidates[0].mtime, true
+		return candidates[0], true
 	}
 	for _, pt := range candidates {
 		if pt.index == lastActive {
-			return pt.mtime, true
+			return pt, true
 		}
 	}
 	// Fallback: earliest mtime.
-	earliest := candidates[0].mtime
+	earliest := candidates[0]
 	for _, pt := range candidates[1:] {
-		if pt.mtime.Before(earliest) {
-			earliest = pt.mtime
+		if pt.mtime.Before(earliest.mtime) {
+			earliest = pt
 		}
 	}
 	return earliest, true
 }
 
-// thinkingStartTime returns the mtime of the state file for the pane whose
+// selectPaneStartTime returns the start time of the pane selected by selectPane.
+func selectPaneStartTime(candidates []paneTime, lastActive string) (time.Time, bool) {
+	pt, ok := selectPane(candidates, lastActive)
+	return pt.mtime, ok
+}
+
+// thinkingStartTime returns the start time and pane index of the pane whose
 // thinking elapsed time should be displayed:
 //
 //   - If exactly one pane is thinking, return its mtime.
 //   - If multiple panes are thinking, return the mtime of the most recently
 //     activated pane (by tmux pane_last_activity) that is in thinking state.
 //     Falls back to the earliest mtime if the last-active pane is not thinking.
-func thinkingStartTime(session, windowIndex string) (time.Time, bool) {
+//
+// The returned pane index identifies the same pane the model emoji is read from
+// (see runStatus), so the elapsed time and model emoji always describe one pane.
+func thinkingStartTime(session, windowIndex string) (time.Time, string, bool) {
 	panes, err := tmuxListPanes(session, windowIndex)
 	if err != nil {
-		return time.Time{}, false
+		return time.Time{}, "", false
 	}
 
 	var thinking []paneTime
@@ -507,7 +520,8 @@ func thinkingStartTime(session, windowIndex string) (time.Time, bool) {
 	}
 
 	lastActive, _ := tmuxLastActivePaneIndex(session, windowIndex)
-	return selectPaneStartTime(thinking, lastActive)
+	pt, ok := selectPane(thinking, lastActive)
+	return pt.mtime, pt.index, ok
 }
 
 // bgWaitingStartTime returns the time from which the ⏳ (bg_waiting) elapsed
@@ -1601,4 +1615,36 @@ func shortModelName(model string) string {
 	}
 	// Fallback: strip the "claude-" prefix.
 	return strings.TrimPrefix(model, "claude-")
+}
+
+// modelEmoji returns the model-specific "thinking" emoji, mirroring
+// ccstatusline's per-model prefix (✨ Fable · 🌀 Opus · 🤖 Sonnet · 🖥️ Haiku).
+// It delegates to shortModelName so the tier match (substring + priority) stays
+// identical; unknown tiers and the empty string fall back to 🤖 (the previous
+// generic thinking emoji), so nothing regresses when the model is unknown.
+func modelEmoji(model string) string {
+	switch shortModelName(model) {
+	case "fable", "mythos":
+		return "✨"
+	case "opus":
+		return "🌀"
+	case "sonnet":
+		return "🤖"
+	case "haiku":
+		return "🖥️"
+	default:
+		return "🤖"
+	}
+}
+
+// thinkingDisplayEmoji returns the base emoji shown for a thinking window: the
+// model-specific emoji derived from the given pane's meta, falling back to 🤖
+// when the meta file is missing (readMeta fails) or records no model (handled by
+// modelEmoji). key is the stateKey of the pane selected by thinkingStartTime.
+func thinkingDisplayEmoji(key string) string {
+	meta, ok := readMeta(key)
+	if !ok {
+		return "🤖"
+	}
+	return modelEmoji(meta.Model)
 }

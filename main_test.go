@@ -1058,6 +1058,86 @@ func TestShortModelName(t *testing.T) {
 	}
 }
 
+func TestModelEmoji(t *testing.T) {
+	cases := map[string]string{
+		"claude-fable-5":    "✨",
+		"claude-mythos-5":   "✨",
+		"claude-opus-4-8":   "🌀",
+		"claude-sonnet-4-6": "🤖",
+		"claude-haiku-4-5":  "🖥️",
+		"claude-next-9":     "🤖", // unknown tier → generic fallback
+		"":                  "🤖", // empty model → generic fallback
+		"some-other-model":  "🤖", // no tier substring → fallback
+	}
+	for model, want := range cases {
+		if got := modelEmoji(model); got != want {
+			t.Errorf("modelEmoji(%q) = %q, want %q", model, got, want)
+		}
+	}
+}
+
+// TestModelEmojiMirrorsShortModelName verifies modelEmoji and shortModelName
+// resolve the same input to the same tier (so the status bar emoji and the
+// status-right model name never disagree about which model is running).
+func TestModelEmojiMirrorsShortModelName(t *testing.T) {
+	tierEmoji := map[string]string{
+		"fable":  "✨",
+		"mythos": "✨",
+		"opus":   "🌀",
+		"sonnet": "🤖",
+		"haiku":  "🖥️",
+	}
+	for _, model := range []string{
+		"claude-fable-5", "claude-mythos-5", "claude-opus-4-8",
+		"claude-sonnet-4-6", "claude-haiku-4-5", "claude-next-9", "",
+	} {
+		tier := shortModelName(model)
+		want, known := tierEmoji[tier]
+		if !known {
+			want = "🤖" // unknown tier → generic fallback
+		}
+		if got := modelEmoji(model); got != want {
+			t.Errorf("modelEmoji(%q) = %q, but shortModelName tier %q maps to %q",
+				model, got, tier, want)
+		}
+	}
+}
+
+// TestThinkingDisplayEmoji verifies the runStatus display-layer swap: a thinking
+// pane's 🤖 becomes the model emoji from that pane's meta, and falls back to 🤖
+// when the meta is absent or records no model.
+func TestThinkingDisplayEmoji(t *testing.T) {
+	dir := t.TempDir()
+	setStateDirForTest(t, dir)
+
+	cases := []struct {
+		name  string
+		model string // "" means write no meta file at all
+		write bool
+		want  string
+	}{
+		{"opus meta", "claude-opus-4-8", true, "🌀"},
+		{"fable meta", "claude-fable-5", true, "✨"},
+		{"sonnet meta", "claude-sonnet-4-6", true, "🤖"},
+		{"haiku meta", "claude-haiku-4-5", true, "🖥️"},
+		{"empty model in meta", "", true, "🤖"},
+		{"no meta file", "", false, "🤖"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			key := stateKey("sess", "1", c.name) // unique key per case
+			if c.write {
+				if err := writeMeta(key, PaneMeta{Model: c.model, InputTokens: 100}); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if got := thinkingDisplayEmoji(key); got != c.want {
+				t.Errorf("thinkingDisplayEmoji(%q) = %q, want %q", key, got, c.want)
+			}
+		})
+	}
+}
+
 // --- helpers ---
 
 func writeJSONL(t *testing.T, path string, lines ...transcriptLine) {

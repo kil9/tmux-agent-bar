@@ -148,7 +148,7 @@ tip ffba347)는 main 과 계보가 끊긴 초기 구축 이력(Phase 1-4)으로,
 `git branch -D worktree-agent-acac9dfa` 로 삭제한다(-D 필요: 미병합 계보). 삭제 전 브랜치
 tip 해시(ffba347)를 이 파일 진행 로그에 남겨 reflog 복구 여지를 확보한다.
 
-### 10. `[ ] TODO` 🤖(thinking) 이모지를 모델별 이모지로 전환 (ccstatusline 매핑 정합)
+### 10. 🤖(thinking) 이모지를 모델별 이모지로 전환 (ccstatusline 매핑 정합) ✅ 완료 (2026-07-02)
 
 **배경**: ccstatusline 은 모델별로 맨 앞 이모지를 전환한다(kil9conf 32864f7:
 ✨ Fable · 🌀 Opus · 🤖 Sonnet · 🖥️ Haiku, 매칭 실패 시 기존값 유지). tmux-agent-bar 의
