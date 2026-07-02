@@ -94,7 +94,7 @@ tmux.conf 는 O_APPEND 라 부분 쓰기 리스크가 낮아 유지.
 유효 JSON 인지 `python3 -c "import json; json.load(open(...))"` 로 확인. 단위 테스트는 어려우므로
 수동 스모크로 갈음.
 
-### 6. `[ ] TODO` 세션명 `_` 엣지 제거 — key 역파싱(SplitN) 폐지
+### 6. 세션명 `_` 엣지 제거 — key 역파싱(SplitN) 폐지 ✅ 완료 (2026-07-02)
 
 **배경**: runHook 은 `tmuxPaneKey` 가 만든 `<session>_<window>_<pane>` 문자열을
 `strings.SplitN(key, "_", 3)` 으로 역파싱해 cleanStaleFiles 인자로 쓴다(2곳: waiting 분기,

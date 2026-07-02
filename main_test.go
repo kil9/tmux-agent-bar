@@ -1135,3 +1135,44 @@ func TestFormatElapsed(t *testing.T) {
 		}
 	}
 }
+
+// TestParsePaneParts verifies the tab-separated "#S\t#I\t#P" parser, including
+// the case that motivated it: a session name containing "_", which the old
+// SplitN(key, "_", 3) reparsing mangled.
+func TestParsePaneParts(t *testing.T) {
+	cases := []struct {
+		name        string
+		raw         string
+		wantSession string
+		wantWindow  string
+		wantPane    string
+		wantErr     bool
+	}{
+		{"plain", "sess\t1\t0\n", "sess", "1", "0", false},
+		{"underscore session", "under_score\t1\t0\n", "under_score", "1", "0", false},
+		{"multiple underscores", "a_b_c\t2\t3\n", "a_b_c", "2", "3", false},
+		{"pane id form", "under_score\t1\t%3\n", "under_score", "1", "%3", false},
+		{"no trailing newline", "sess\t0\t0", "sess", "0", "0", false},
+		{"too few fields", "sess\t1\n", "", "", "", true},
+		{"empty", "\n", "", "", "", true},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			session, window, pane, err := parsePaneParts(c.raw)
+			if (err != nil) != c.wantErr {
+				t.Fatalf("parsePaneParts(%q) err = %v, wantErr = %v", c.raw, err, c.wantErr)
+			}
+			if c.wantErr {
+				return
+			}
+			if session != c.wantSession || window != c.wantWindow || pane != c.wantPane {
+				t.Errorf("parsePaneParts(%q) = (%q, %q, %q), want (%q, %q, %q)",
+					c.raw, session, window, pane, c.wantSession, c.wantWindow, c.wantPane)
+			}
+			// The reassembled key must match the file-name scheme unchanged.
+			if got, want := stateKey(session, window, pane), c.wantSession+"_"+c.wantWindow+"_"+c.wantPane; got != want {
+				t.Errorf("stateKey after parse = %q, want %q", got, want)
+			}
+		})
+	}
+}

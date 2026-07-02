@@ -103,13 +103,14 @@ func runHook(status string) {
 	// Read hook stdin — stdin can only be read once.
 	hookData, _ := parseHookStdin()
 
-	key, err := tmuxPaneKey(paneID)
+	session, windowIndex, pane, err := tmuxPaneParts(paneID)
 	if err != nil {
 		// tmux unavailable or pane lookup failed (e.g. TMUX_PANE set by a
 		// tmux-clone like psmux that doesn't support display-message).
 		// Treat the same as "not in tmux" and exit silently.
 		return
 	}
+	key := stateKey(session, windowIndex, pane)
 
 	// SessionEnd: Claude Code exited (or /clear started a fresh session) — drop
 	// every file for this pane immediately so stale state/meta doesn't linger
@@ -135,11 +136,8 @@ func runHook(status string) {
 		if meta, ok := resolvePaneMeta(hookData); ok {
 			_ = writeMeta(key, meta)
 		}
-		parts := strings.SplitN(key, "_", 3)
-		if len(parts) == 3 {
-			if panes, err := tmuxListPanes(parts[0], parts[1]); err == nil {
-				cleanStaleFiles(stateDir, parts[0], parts[1], panes)
-			}
+		if panes, err := tmuxListPanes(session, windowIndex); err == nil {
+			cleanStaleFiles(stateDir, session, windowIndex, panes)
 		}
 		return
 	}
@@ -196,11 +194,8 @@ func runHook(status string) {
 	}
 
 	// Best-effort: remove state files for panes that no longer exist.
-	parts := strings.SplitN(key, "_", 3) // session, window, pane
-	if len(parts) == 3 {
-		if panes, err := tmuxListPanes(parts[0], parts[1]); err == nil {
-			cleanStaleFiles(stateDir, parts[0], parts[1], panes)
-		}
+	if panes, err := tmuxListPanes(session, windowIndex); err == nil {
+		cleanStaleFiles(stateDir, session, windowIndex, panes)
 	}
 }
 
@@ -395,11 +390,12 @@ func runClaudeRight(paneID string) {
 	// inactive: no ctx segment — just the transition into the date segment.
 	inactive := func() { fmt.Printf("#[fg=%s,bg=colour234]%s", dateBg, sep) }
 
-	key, err := tmuxPaneKey(paneID)
+	session, windowIndex, pane, err := tmuxPaneParts(paneID)
 	if err != nil {
 		inactive()
 		return
 	}
+	key := stateKey(session, windowIndex, pane)
 	meta, ok := readMeta(key)
 	if !ok || meta.Model == "" {
 		inactive()
@@ -603,13 +599,29 @@ func tmuxCommand(args ...string) ([]byte, error) {
 	return exec.CommandContext(ctx, "tmux", args...).Output()
 }
 
-// tmuxPaneKey returns "<session>_<window>_<pane>" for the given pane ID.
-func tmuxPaneKey(paneID string) (string, error) {
-	out, err := tmuxCommand("display-message", "-p", "-t", paneID, "#S_#I_#P")
+// tmuxPaneParts returns the session, window index, and pane index for the given
+// pane ID. It queries tmux with a tab-separated format so the three components
+// can be read directly, rather than reparsing a "<session>_<window>_<pane>"
+// key with SplitN — which breaks when the session name itself contains "_".
+// Assemble the state file key from the returned values via stateKey.
+func tmuxPaneParts(paneID string) (session, windowIndex, pane string, err error) {
+	out, err := tmuxCommand("display-message", "-p", "-t", paneID, "#S\t#I\t#P")
 	if err != nil {
-		return "", err
+		return "", "", "", err
 	}
-	return strings.TrimSpace(string(out)), nil
+	return parsePaneParts(string(out))
+}
+
+// parsePaneParts splits tmux's tab-separated "#S\t#I\t#P" output into its
+// session, window, and pane components. Extracted from tmuxPaneParts so the
+// parsing can be unit-tested without invoking tmux. Session names may contain
+// "_" (or any character except tab), so a tab separator is unambiguous.
+func parsePaneParts(raw string) (session, windowIndex, pane string, err error) {
+	fields := strings.SplitN(strings.TrimSpace(raw), "\t", 3)
+	if len(fields) != 3 {
+		return "", "", "", fmt.Errorf("unexpected pane format: %q", raw)
+	}
+	return fields[0], fields[1], fields[2], nil
 }
 
 // tmuxCurrentWindowIndex returns the index of the currently active window.
