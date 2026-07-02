@@ -29,17 +29,25 @@ func main() {
 	if len(os.Args) >= 2 {
 		subcmd = os.Args[1]
 	}
-	go func() {
-		time.Sleep(900 * time.Millisecond)
-		switch subcmd {
-		case "status":
-			// ⌛ = "status lookup timed out". Distinct from bg_waiting's ⏳.
-			fmt.Print("⌛")
-		case "claude-right":
-			fmt.Printf("#[fg=colour66,bg=colour234]\ue0ba")
-		}
-		os.Exit(124)
-	}()
+	// Only the status-bar rendering subcommands run under the hard deadline: they
+	// are spawned every status-interval and must never hang the bar. install is a
+	// one-shot command that legitimately takes longer and rewrites
+	// ~/.claude/settings.json; killing it mid-write could corrupt that file (and
+	// drop every hook), so it must not be subject to the 900ms watchdog.
+	switch subcmd {
+	case "status", "claude-right", "hook":
+		go func() {
+			time.Sleep(900 * time.Millisecond)
+			switch subcmd {
+			case "status":
+				// ⌛ = "status lookup timed out". Distinct from bg_waiting's ⏳.
+				fmt.Print("⌛")
+			case "claude-right":
+				fmt.Printf("#[fg=colour66,bg=colour234]\ue0ba")
+			}
+			os.Exit(124)
+		}()
+	}
 
 	if len(os.Args) < 2 {
 		fmt.Fprintln(os.Stderr, "usage: tmux-agent-bar <hook|status|claude-right|install> [args...]")
@@ -1314,7 +1322,15 @@ func installClaudeSettings() error {
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return err
 	}
-	if err := os.WriteFile(path, out, 0o644); err != nil {
+	// Atomic temp+rename so an interrupted write can never leave a truncated
+	// settings.json (which would drop every hook). writeFileAtomic creates its
+	// temp file in filepath.Dir(path) (~/.claude), so the rename stays within one
+	// directory and is atomic. os.CreateTemp yields 0600, so restore the
+	// conventional 0644 afterward (chmod only fails if the rename already failed).
+	if err := writeFileAtomic(path, out); err != nil {
+		return err
+	}
+	if err := os.Chmod(path, 0o644); err != nil {
 		return err
 	}
 	fmt.Println("~/.claude/settings.json: configured")

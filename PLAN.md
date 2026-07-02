@@ -79,7 +79,7 @@ gh 는 ssh config 로 `ssh.github.com:443` 우회이므로 push 전 `nc -z -w4 s
 가드 skip 을 확인). Linux 실기기에서 기존 동작(살아있는 claude → 표시, 죽은 pane → meta 삭제) 회귀
 없음 확인.
 
-### 5. `[ ] TODO` install 안정화 — 워치독 제외 + settings.json 원자적 쓰기
+### 5. install 안정화 — 워치독 제외 + settings.json 원자적 쓰기 ✅ 완료 (2026-07-02)
 
 **배경**: main() 의 900ms 워치독 고루틴은 서브커맨드와 무관하게 `os.Exit(124)` 를 호출한다.
 `install` 이 900ms 를 넘기면 `os.WriteFile`(truncate 후 쓰기) 도중 죽어 `~/.claude/settings.json`
